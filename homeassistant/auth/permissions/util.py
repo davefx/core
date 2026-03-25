@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from functools import wraps
 from typing import cast
 
 from .const import SUBCAT_ALL
@@ -30,14 +29,23 @@ def compile_policy(
     Subcategories are mapping key -> lookup function, ordered by highest
     priority first.
     """
-    # None, False, empty dict
-    if not policy:
+    # None, empty dict
+    if policy is None or (isinstance(policy, dict) and not policy):
 
         def apply_policy_deny_all(entity_id: str, key: str) -> bool:
             """Decline all."""
             return False
 
         return apply_policy_deny_all
+
+    # Explicit deny of entire category
+    if policy is False:
+
+        def apply_policy_explicit_deny_all(entity_id: str, key: str) -> bool:
+            """Explicitly deny all."""
+            return False
+
+        return apply_policy_explicit_deny_all
 
     if policy is True:
 
@@ -54,31 +62,66 @@ def compile_policy(
     for key, lookup_func in subcategories.items():
         lookup_value = policy.get(key)
 
-        # If any lookup value is `True`, it will always be positive
-        if isinstance(lookup_value, bool):
-            return lambda object_id, key: True
-
-        if lookup_value is not None:
+        if lookup_value is True:
+            # This subcategory allows all. Don't short-circuit because
+            # lower-priority subcategories might have deny entries that
+            # must take precedence.
+            funcs.append(_always_grant)
+        elif lookup_value is False:
+            # This subcategory explicitly denies all.
+            funcs.append(_always_deny)
+        elif lookup_value is not None:
             funcs.append(_gen_dict_test_func(perm_lookup, lookup_func, lookup_value))
+
+    if not funcs:
+
+        def apply_policy_no_funcs(object_id: str, key: str) -> bool:
+            """No matching subcategories, deny."""
+            return False
+
+        return apply_policy_no_funcs
 
     if len(funcs) == 1:
         func = funcs[0]
 
-        @wraps(func)
         def apply_policy_func(object_id: str, key: str) -> bool:
             """Apply a single policy function."""
-            return func(object_id, key) is True
+            result = func(object_id, key)
+            if result is None:
+                return False
+            return result
 
         return apply_policy_func
 
     def apply_policy_funcs(object_id: str, key: str) -> bool:
-        """Apply several policy functions."""
+        """Apply several policy functions.
+
+        Deny always wins: if any subcategory returns False, the result is
+        False regardless of priority. Otherwise, the first non-None result
+        (by priority order) determines the outcome.
+        """
+        first_result: bool | None = None
         for func in funcs:
-            if (result := func(object_id, key)) is not None:
-                return result
-        return False
+            result = func(object_id, key)
+            if result is False:
+                return False
+            if first_result is None and result is not None:
+                first_result = result
+        if first_result is None:
+            return False
+        return first_result
 
     return apply_policy_funcs
+
+
+def _always_grant(object_id: str, key: str) -> bool:
+    """Always grant access."""
+    return True
+
+
+def _always_deny(object_id: str, key: str) -> bool | None:
+    """Always deny access."""
+    return False
 
 
 def _gen_dict_test_func(
@@ -95,7 +138,12 @@ def _gen_dict_test_func(
 
         assert isinstance(schema, dict)
 
-        return schema.get(key)
+        result = schema.get(key)
+        if result is None:
+            # Fall back to the "all" key as a wildcard default for
+            # unspecified permission keys at this level.
+            return schema.get(SUBCAT_ALL)
+        return result
 
     return test_value
 

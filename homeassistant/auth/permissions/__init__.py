@@ -13,7 +13,9 @@ from .models import PermissionLookup
 from .types import PolicyType
 from .util import test_all
 
-POLICY_SCHEMA = vol.Schema({vol.Optional(CAT_ENTITIES): ENTITY_POLICY_SCHEMA})
+POLICY_SCHEMA = vol.Schema(
+    {vol.Optional(CAT_ENTITIES): ENTITY_POLICY_SCHEMA}
+)
 
 __all__ = [
     "POLICY_SCHEMA",

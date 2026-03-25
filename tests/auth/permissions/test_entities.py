@@ -30,10 +30,12 @@ def test_entities_empty() -> None:
 
 
 def test_entities_false() -> None:
-    """Test entity ID policy."""
+    """Test entity ID policy with explicit deny."""
     policy = False
-    with pytest.raises(vol.Invalid):
-        ENTITY_POLICY_SCHEMA(policy)
+    ENTITY_POLICY_SCHEMA(policy)
+    compiled = compile_entities(policy, None)
+    assert compiled("light.kitchen", "read") is False
+    assert compiled("light.kitchen", "control") is False
 
 
 def test_entities_true() -> None:
@@ -62,10 +64,13 @@ def test_entities_domains_domain_true() -> None:
 
 
 def test_entities_domains_domain_false() -> None:
-    """Test entity ID policy."""
+    """Test entity domain policy with explicit deny."""
     policy = {"domains": {"light": False}}
-    with pytest.raises(vol.Invalid):
-        ENTITY_POLICY_SCHEMA(policy)
+    ENTITY_POLICY_SCHEMA(policy)
+    compiled = compile_entities(policy, None)
+    assert compiled("light.kitchen", "read") is False
+    assert compiled("light.kitchen", "control") is False
+    assert compiled("switch.kitchen", "read") is False
 
 
 def test_entities_entity_ids_true() -> None:
@@ -77,10 +82,11 @@ def test_entities_entity_ids_true() -> None:
 
 
 def test_entities_entity_ids_false() -> None:
-    """Test entity ID policy."""
+    """Test entity IDs policy with explicit deny."""
     policy = {"entity_ids": False}
-    with pytest.raises(vol.Invalid):
-        ENTITY_POLICY_SCHEMA(policy)
+    ENTITY_POLICY_SCHEMA(policy)
+    compiled = compile_entities(policy, None)
+    assert compiled("light.kitchen", "read") is False
 
 
 def test_entities_entity_ids_entity_id_true() -> None:
@@ -93,10 +99,13 @@ def test_entities_entity_ids_entity_id_true() -> None:
 
 
 def test_entities_entity_ids_entity_id_false() -> None:
-    """Test entity ID policy."""
+    """Test specific entity ID policy with explicit deny."""
     policy = {"entity_ids": {"light.kitchen": False}}
-    with pytest.raises(vol.Invalid):
-        ENTITY_POLICY_SCHEMA(policy)
+    ENTITY_POLICY_SCHEMA(policy)
+    compiled = compile_entities(policy, None)
+    assert compiled("light.kitchen", "read") is False
+    assert compiled("light.kitchen", "control") is False
+    assert compiled("switch.kitchen", "read") is False
 
 
 def test_entities_control_only() -> None:
