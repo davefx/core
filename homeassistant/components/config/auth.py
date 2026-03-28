@@ -7,6 +7,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.auth.models import User
+from homeassistant.auth.permissions import POLICY_SCHEMA
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
@@ -32,6 +33,10 @@ def async_setup(hass: HomeAssistant) -> bool:
     )
     websocket_api.async_register_command(hass, websocket_create)
     websocket_api.async_register_command(hass, websocket_update)
+    websocket_api.async_register_command(hass, websocket_group_list)
+    websocket_api.async_register_command(hass, websocket_group_create)
+    websocket_api.async_register_command(hass, websocket_group_update)
+    websocket_api.async_register_command(hass, websocket_group_delete)
     return True
 
 
@@ -154,6 +159,131 @@ async def websocket_update(
     connection.send_message(
         websocket_api.result_message(msg_id, {"user": _user_info(user)})
     )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): "config/auth/group/list"}
+)
+@websocket_api.async_response
+async def websocket_group_list(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return a list of groups."""
+    groups = await hass.auth.async_get_groups()
+    result = [_group_info(group) for group in groups]
+    connection.send_message(websocket_api.result_message(msg["id"], result))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "config/auth/group/create",
+        vol.Required("name"): str,
+        vol.Required("policy"): POLICY_SCHEMA,
+    }
+)
+@websocket_api.async_response
+async def websocket_group_create(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Create a custom group."""
+    group = await hass.auth.async_create_group(msg["name"], msg["policy"])
+    connection.send_message(
+        websocket_api.result_message(msg["id"], {"group": _group_info(group)})
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "config/auth/group/update",
+        vol.Required("group_id"): str,
+        vol.Optional("name"): str,
+        vol.Optional("policy"): POLICY_SCHEMA,
+    }
+)
+@websocket_api.async_response
+async def websocket_group_update(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Update a custom group."""
+    group = await hass.auth.async_get_group(msg["group_id"])
+    if group is None:
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Group not found"
+            )
+        )
+        return
+
+    try:
+        await hass.auth.async_update_group(
+            group, name=msg.get("name"), policy=msg.get("policy")
+        )
+    except ValueError as err:
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"], "cannot_modify_system_group", str(err)
+            )
+        )
+        return
+
+    connection.send_message(
+        websocket_api.result_message(msg["id"], {"group": _group_info(group)})
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "config/auth/group/delete",
+        vol.Required("group_id"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_group_delete(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Delete a custom group."""
+    group = await hass.auth.async_get_group(msg["group_id"])
+    if group is None:
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Group not found"
+            )
+        )
+        return
+
+    try:
+        await hass.auth.async_delete_group(group)
+    except ValueError as err:
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"], "cannot_delete_group", str(err)
+            )
+        )
+        return
+
+    connection.send_message(websocket_api.result_message(msg["id"]))
+
+
+def _group_info(group: Any) -> dict[str, Any]:
+    """Format a group."""
+    return {
+        "id": group.id,
+        "name": group.name,
+        "policy": group.policy,
+        "system_generated": group.system_generated,
+    }
 
 
 def _user_info(user: User) -> dict[str, Any]:

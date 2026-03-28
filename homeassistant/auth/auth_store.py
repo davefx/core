@@ -65,12 +65,64 @@ class AuthStore:
         self._token_id_to_user_id: dict[str, str] = {}
 
     async def async_get_groups(self) -> list[models.Group]:
-        """Retrieve all users."""
+        """Retrieve all groups."""
         return list(self._groups.values())
 
     async def async_get_group(self, group_id: str) -> models.Group | None:
-        """Retrieve all users."""
+        """Retrieve a group by id."""
         return self._groups.get(group_id)
+
+    async def async_create_group(
+        self, name: str, policy: PolicyType
+    ) -> models.Group:
+        """Create a new custom group."""
+        group = models.Group(
+            name=name,
+            policy=policy,
+            system_generated=False,
+        )
+
+        self._groups[group.id] = group
+        self._async_schedule_save()
+        return group
+
+    async def async_update_group(
+        self,
+        group: models.Group,
+        name: str | None = None,
+        policy: PolicyType | None = None,
+    ) -> None:
+        """Update an existing group."""
+        if group.system_generated:
+            raise ValueError("Cannot modify system-generated groups")
+
+        if name is not None:
+            group.name = name
+        if policy is not None:
+            group.policy = policy
+
+        # Invalidate permission caches for users in this group
+        for user in self._users.values():
+            if group in user.groups:
+                user.invalidate_cache()
+
+        self._async_schedule_save()
+
+    async def async_delete_group(self, group: models.Group) -> None:
+        """Delete a custom group."""
+        if group.system_generated:
+            raise ValueError("Cannot delete system-generated groups")
+
+        # Check if any users are assigned to this group
+        for user in self._users.values():
+            if group in user.groups:
+                raise ValueError(
+                    f"Cannot delete group '{group.name}': "
+                    "users are still assigned to it"
+                )
+
+        del self._groups[group.id]
+        self._async_schedule_save()
 
     async def async_get_users(self) -> list[models.User]:
         """Retrieve all users."""
