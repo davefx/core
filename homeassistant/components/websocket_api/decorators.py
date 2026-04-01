@@ -71,6 +71,56 @@ def require_admin(func: const.WebSocketCommandHandler) -> const.WebSocketCommand
     return with_admin
 
 
+def require_permission(
+    category: str, key: str
+) -> Callable[[const.WebSocketCommandHandler], const.WebSocketCommandHandler]:
+    """Websocket decorator to require a specific permission.
+
+    This is a more granular alternative to require_admin. It checks
+    the user's permissions for a specific category and key rather
+    than requiring full admin access.
+
+    Example usage:
+        @require_permission("services", "control")
+        def handle_my_command(...):
+    """
+
+    def decorator(
+        func: const.WebSocketCommandHandler,
+    ) -> const.WebSocketCommandHandler:
+        @wraps(func)
+        def with_permission(
+            hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
+        ) -> None:
+            """Check permission and call function."""
+            user = connection.user
+
+            if user is None:
+                raise Unauthorized
+
+            # Admins/owners bypass permission checks
+            if not user.is_admin:
+                if category == "services":
+                    if not user.permissions.check_service(msg.get("service", ""), key):
+                        raise Unauthorized
+                elif category == "automations":
+                    if not user.permissions.check_automation(
+                        msg.get("entity_id", ""), key
+                    ):
+                        raise Unauthorized
+                elif category == "entities":
+                    if not user.permissions.check_entity(
+                        msg.get("entity_id", ""), key
+                    ):
+                        raise Unauthorized
+
+            func(hass, connection, msg)
+
+        return with_permission
+
+    return decorator
+
+
 def ws_require_user(
     only_owner: bool = False,
     only_system_user: bool = False,

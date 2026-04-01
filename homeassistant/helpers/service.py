@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast, override
 
 import voluptuous as vol
 
-from homeassistant.auth.permissions.const import CAT_ENTITIES, POLICY_CONTROL
+from homeassistant.auth.permissions.const import CAT_ENTITIES, POLICY_CONTROL, CAT_SERVICES
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import (
     ATTR_ENTITY_ID,
@@ -746,6 +746,13 @@ async def entity_service_call(
         if user is None:
             raise UnknownUser(context=call.context)
         if not user.is_admin:
+            # Check service-level permissions before entity-level
+            service_name = f"{call.domain}.{call.service}"
+            if not user.permissions.check_service(service_name, POLICY_CONTROL):
+                raise Unauthorized(
+                    context=call.context,
+                    permission=POLICY_CONTROL,
+                )
             entity_perms = user.permissions.check_entity
 
     target_all_entities = call.data.get(ATTR_ENTITY_ID) == ENTITY_MATCH_ALL
