@@ -10,6 +10,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.setup import EventComponentLoaded
 
 from . import (
+    acl,
     area_registry,
     auth,
     auth_provider_homeassistant,
@@ -27,6 +28,7 @@ from . import (
 from .const import DOMAIN
 
 SECTIONS = (
+    acl,
     area_registry,
     auth,
     auth_provider_homeassistant,
