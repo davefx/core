@@ -7,10 +7,12 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.auth.acl import ACLManager
+from homeassistant.auth.acl.audit import AuditLevel, AuditLogger
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
 ACL_MANAGER_KEY = "acl_manager"
+AUDIT_LOGGER_KEY = "acl_audit_logger"
 
 
 @callback
@@ -21,6 +23,8 @@ def async_setup(hass: HomeAssistant) -> bool:
     websocket_api.async_register_command(hass, websocket_acl_rules_update)
     websocket_api.async_register_command(hass, websocket_acl_rules_delete)
     websocket_api.async_register_command(hass, websocket_acl_effective_permissions)
+    websocket_api.async_register_command(hass, websocket_acl_audit_list)
+    websocket_api.async_register_command(hass, websocket_acl_audit_clear)
     return True
 
 
@@ -30,6 +34,14 @@ def _get_acl_manager(hass: HomeAssistant) -> ACLManager:
         manager = ACLManager(hass)
         hass.data[ACL_MANAGER_KEY] = manager
     return hass.data[ACL_MANAGER_KEY]
+
+
+def _get_audit_logger(hass: HomeAssistant) -> AuditLogger:
+    """Get or create the audit logger."""
+    if AUDIT_LOGGER_KEY not in hass.data:
+        logger = AuditLogger(hass)
+        hass.data[AUDIT_LOGGER_KEY] = logger
+    return hass.data[AUDIT_LOGGER_KEY]
 
 
 @websocket_api.require_admin
@@ -207,3 +219,56 @@ async def websocket_acl_effective_permissions(
     connection.send_message(
         websocket_api.result_message(msg["id"], permissions)
     )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "config/acl/audit/list",
+        vol.Optional("user_id"): str,
+        vol.Optional("action"): str,
+        vol.Optional("limit"): vol.All(int, vol.Range(min=1, max=10000)),
+    }
+)
+@websocket_api.async_response
+async def websocket_acl_audit_list(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Query audit log entries."""
+    logger = _get_audit_logger(hass)
+    await logger.async_load()
+
+    entries = logger.get_entries(
+        user_id=msg.get("user_id"),
+        action=msg.get("action"),
+        limit=msg.get("limit"),
+    )
+    connection.send_message(
+        websocket_api.result_message(msg["id"], entries)
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): "config/acl/audit/clear"}
+)
+@websocket_api.async_response
+async def websocket_acl_audit_clear(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Clear the audit log (owner only)."""
+    if not connection.user.is_owner:
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"], "not_owner", "Only the owner can clear the audit log"
+            )
+        )
+        return
+
+    logger = _get_audit_logger(hass)
+    logger.clear()
+    connection.send_message(websocket_api.result_message(msg["id"]))
