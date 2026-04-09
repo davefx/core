@@ -21,13 +21,14 @@ class ACLRule:
     permission: str  # "read", "control", "edit", "trigger"
     effect: Literal["allow", "deny"]
     priority: int = 0  # lower = higher priority
+    conditions: dict | None = None  # optional time-based conditions
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: datetime = field(default_factory=dt_util.utcnow)
     modified_at: datetime = field(default_factory=dt_util.utcnow)
 
     def to_dict(self) -> dict:
         """Serialize to dict for storage."""
-        return {
+        result = {
             "id": self.id,
             "role_id": self.role_id,
             "category": self.category,
@@ -39,6 +40,9 @@ class ACLRule:
             "created_at": self.created_at.isoformat(),
             "modified_at": self.modified_at.isoformat(),
         }
+        if self.conditions is not None:
+            result["conditions"] = self.conditions
+        return result
 
     @classmethod
     def from_dict(cls, data: dict) -> ACLRule:
@@ -52,6 +56,7 @@ class ACLRule:
             permission=data["permission"],
             effect=data["effect"],
             priority=data.get("priority", 0),
+            conditions=data.get("conditions"),
             created_at=dt_util.parse_datetime(data["created_at"]) or dt_util.utcnow(),
             modified_at=dt_util.parse_datetime(data["modified_at"]) or dt_util.utcnow(),
         )
