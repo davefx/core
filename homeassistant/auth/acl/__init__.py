@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.util import dt as dt_util
 
 from ..permissions.types import PolicyType
+from .conditions import evaluate_conditions
 from .models import ACLRule
 from .store import ACLStore
 
@@ -41,6 +42,7 @@ class ACLManager:
         permission: str,
         effect: str,
         priority: int = 0,
+        conditions: dict | None = None,
     ) -> ACLRule:
         """Create a new ACL rule and update the group's policy."""
         rule = ACLRule(
@@ -51,6 +53,7 @@ class ACLManager:
             permission=permission,
             effect=effect,
             priority=priority,
+            conditions=conditions,
         )
         self._store.async_create_rule(rule)
         await self._async_compile_and_update_group(role_id)
@@ -75,6 +78,7 @@ class ACLManager:
             "permission",
             "effect",
             "priority",
+            "conditions",
         ):
             if attr in kwargs:
                 setattr(rule, attr, kwargs[attr])
@@ -107,7 +111,14 @@ class ACLManager:
         Rules are grouped by category, then by target_type, then by target_id.
         The resulting PolicyType can be used directly as a group's policy.
         """
-        rules = self._store.async_get_rules(role_id)
+        all_rules = self._store.async_get_rules(role_id)
+        if not all_rules:
+            return {}
+
+        # Filter out rules whose conditions are not currently met
+        rules = [
+            r for r in all_rules if evaluate_conditions(r.conditions)
+        ]
         if not rules:
             return {}
 
