@@ -1,0 +1,264 @@
+name: Build HA Core with ACL patches
+
+on:
+  schedule:
+    # Check for new releases daily at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "HA version to build (e.g., 2026.5.0). Leave empty to auto-detect latest."
+        required: false
+        type: string
+      force:
+        description: "Force rebuild even if already built"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  BASE_IMAGE_VERSION: "2026.01.0"
+  ACL_BRANCH: "feature/professional-acl"
+  MACHINES: '["generic-x86-64", "raspberrypi4-64", "raspberrypi5-64"]'
+
+permissions:
+  contents: write
+  packages: write
+  issues: write
+
+jobs:
+  check-release:
+    name: Check for new HA release
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      should_build: ${{ steps.detect.outputs.should_build }}
+    steps:
+      - name: Detect latest stable release
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION=$(gh api repos/home-assistant/core/releases/latest --jq '.tag_name')
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Check if we already built this version
+          BUILT_TAG="acl-built-${VERSION}"
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "Force build requested for ${VERSION}"
+          elif gh api "repos/${{ github.repository }}/git/refs/tags/${BUILT_TAG}" > /dev/null 2>&1; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Already built ${VERSION}, skipping"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "New version detected: ${VERSION}"
+          fi
+
+  merge-patches:
+    name: Merge ACL patches
+    needs: check-release
+    if: needs.check-release.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    outputs:
+      merge_sha: ${{ steps.merge.outputs.sha }}
+    steps:
+      - name: Checkout official release
+        uses: actions/checkout@v4
+        with:
+          repository: home-assistant/core
+          ref: ${{ needs.check-release.outputs.version }}
+          fetch-depth: 0
+
+      - name: Add fork remote and merge ACL branch
+        id: merge
+        run: |
+          git config user.name "ACL Builder"
+          git config user.email "acl-builder@users.noreply.github.com"
+
+          # Add our fork with the ACL patches
+          git remote add fork https://github.com/${{ github.repository }}.git
+          git fetch fork ${{ env.ACL_BRANCH }}
+
+          # Attempt merge
+          if git merge fork/${{ env.ACL_BRANCH }} --no-edit -m "Merge ACL patches onto ${{ needs.check-release.outputs.version }}"; then
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "Merge successful"
+          else
+            echo "Merge conflict detected!"
+            git merge --abort
+            exit 1
+          fi
+
+      - name: Upload merged source
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged-source
+          path: .
+          retention-days: 1
+
+  build-base:
+    name: Build base (${{ matrix.arch }})
+    needs: [check-release, merge-patches]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Download merged source
+        uses: actions/download-artifact@v4
+        with:
+          name: merged-source
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.arch }}-homeassistant:${{ needs.check-release.outputs.version }}
+          build-args: |
+            BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-homeassistant-base:${{ env.BASE_IMAGE_VERSION }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+  build-machines:
+    name: Build ${{ matrix.machine }}
+    needs: [check-release, build-base]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - machine: generic-x86-64
+            arch: amd64
+            runner: ubuntu-24.04
+          - machine: raspberrypi4-64
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+          - machine: raspberrypi5-64
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Download merged source
+        uses: actions/download-artifact@v4
+        with:
+          name: merged-source
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push machine image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./machine/${{ matrix.machine }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.machine }}-homeassistant:${{ needs.check-release.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.machine }}-homeassistant:stable
+          build-args: |
+            BUILD_FROM=ghcr.io/${{ github.repository_owner }}/${{ matrix.arch }}-homeassistant:${{ needs.check-release.outputs.version }}
+
+  publish-manifest:
+    name: Publish version manifest
+    needs: [check-release, build-machines]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ACL_BRANCH }}
+
+      - name: Generate version.json
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          OWNER="${{ github.repository_owner }}"
+
+          cat > version.json << MANIFEST
+          {
+            "homeassistant": {
+              "generic-x86-64": "${VERSION}",
+              "raspberrypi4-64": "${VERSION}",
+              "raspberrypi5-64": "${VERSION}"
+            },
+            "images": {
+              "core": "ghcr.io/${OWNER}/{machine}-homeassistant"
+            }
+          }
+          MANIFEST
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
+          publish_branch: gh-pages
+          keep_files: false
+          exclude_assets: |
+            .github
+            homeassistant
+            tests
+            machine
+            rootfs
+            requirements*.txt
+            Dockerfile*
+            pyproject.toml
+            script
+
+      - name: Tag as built
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          gh api "repos/${{ github.repository }}/git/refs" \
+            -f ref="refs/tags/acl-built-${VERSION}" \
+            -f sha="${{ github.sha }}" || true
+
+  notify-failure:
+    name: Notify on merge failure
+    needs: [merge-patches]
+    if: failure()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create issue for merge conflict
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "Merge conflict: ACL patches on ${VERSION}" \
+            --body "The ACL branch (\`${{ env.ACL_BRANCH }}\`) failed to merge cleanly onto HA Core \`${VERSION}\`. Manual resolution is needed.
+
+          **Steps to fix:**
+          1. \`git fetch origin && git fetch upstream\`
+          2. \`git checkout ${{ env.ACL_BRANCH }}\`
+          3. \`git merge ${VERSION}\`
+          4. Resolve conflicts, commit, and push
+          5. Re-run the workflow"
