@@ -18,7 +18,7 @@ on:
 
 env:
   BASE_IMAGE_VERSION: "2026.01.0"
-  ACL_BRANCH: "feature/professional-acl"
+  ACL_BRANCH: "acl-patches"
   MACHINES: '["generic-x86-64", "raspberrypi4-64", "raspberrypi5-64"]'
 
 permissions:
