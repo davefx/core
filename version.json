@@ -1,1 +1,10 @@
-{}
+{
+  "homeassistant": {
+    "generic-x86-64": "2026.4.3",
+    "raspberrypi4-64": "2026.4.3",
+    "raspberrypi5-64": "2026.4.3"
+  },
+  "images": {
+    "core": "ghcr.io/davefx/{machine}-homeassistant"
+  }
+}
