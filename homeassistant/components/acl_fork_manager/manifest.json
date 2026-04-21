@@ -1,0 +1,11 @@
+{
+  "domain": "acl_fork_manager",
+  "name": "ACL fork update manager",
+  "codeowners": ["@davefx"],
+  "after_dependencies": ["hassio"],
+  "documentation": "https://github.com/davefx/core/tree/acl-patches",
+  "integration_type": "system",
+  "iot_class": "cloud_polling",
+  "quality_scale": "internal",
+  "single_config_entry": true
+}
