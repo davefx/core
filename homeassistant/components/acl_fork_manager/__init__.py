@@ -7,16 +7,19 @@ ACL-patched fork. Runs as a background service that:
 2. Periodically checks for new ACL fork releases.
 3. When a new version is available, sets the fork image and triggers
    an update via the Supervisor API.
+4. Registers the ACL management panel in the sidebar.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from datetime import datetime
 
 import aiohttp
 
+from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -34,14 +37,29 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+PANEL_URL = "/acl_fork_manager/acl-panel.js"
+PANEL_PATH = Path(__file__).parent / "frontend" / "acl-panel.js"
+
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the ACL fork update manager."""
-    # Only run under Supervisor (HA OS / HA Supervised)
+    # Register the ACL management panel (works in all environments)
+    hass.http.register_static_path(PANEL_URL, str(PANEL_PATH), cache_headers=False)
+    await async_register_panel(
+        hass,
+        webcomponent_name="acl-panel",
+        frontend_url_path="acl",
+        sidebar_title="Access control",
+        sidebar_icon="mdi:shield-lock",
+        module_url=PANEL_URL,
+        require_admin=True,
+    )
+
+    # Only run fork updater under Supervisor (HA OS / HA Supervised)
     if "SUPERVISOR" not in os.environ:
-        _LOGGER.debug("Not running under Supervisor, skipping ACL fork manager")
+        _LOGGER.debug("Not running under Supervisor, skipping fork updater")
         return True
 
     supervisor_token = os.environ.get("SUPERVISOR_TOKEN", "")
