@@ -94,6 +94,16 @@ jobs:
             exit 1
           fi
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Generate translations
+        run: |
+          pip install orjson
+          python3 -m script.translations develop --all
+
       - name: Upload merged source
         uses: actions/upload-artifact@v4
         with:
