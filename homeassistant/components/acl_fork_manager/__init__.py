@@ -19,6 +19,7 @@ from datetime import datetime
 
 import aiohttp
 
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
@@ -46,7 +47,9 @@ CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the ACL fork update manager."""
     # Register the ACL management panel (works in all environments)
-    hass.http.register_static_path(PANEL_URL, str(PANEL_PATH), cache_headers=False)
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(PANEL_URL, str(PANEL_PATH), cache_headers=False)]
+    )
     await async_register_panel(
         hass,
         webcomponent_name="acl-panel",

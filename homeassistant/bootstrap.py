@@ -221,6 +221,9 @@ DEFAULT_INTEGRATIONS = {
     "network",
     "system_health",
     #
+    # ACL management:
+    "acl_fork_manager",
+    #
     # Key-feature:
     "automation",
     "person",
@@ -269,7 +272,6 @@ DEFAULT_INTEGRATIONS_RECOVERY_MODE = {
 DEFAULT_INTEGRATIONS_SUPERVISOR = {
     # These integrations are set up if using the Supervisor
     "hassio",
-    "acl_fork_manager",
 }
 
 CRITICAL_INTEGRATIONS = {
