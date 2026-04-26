@@ -7,6 +7,7 @@ import voluptuous as vol
 from homeassistant.auth.models import User
 from homeassistant.auth.permissions import POLICY_SCHEMA
 from homeassistant.components import websocket_api
+from homeassistant.components.config.acl import ACL_MANAGER_KEY
 from homeassistant.core import HomeAssistant, callback
 
 
@@ -181,6 +182,9 @@ async def websocket_group_create(
 ) -> None:
     """Create a custom group."""
     group = await hass.auth.async_create_group(msg["name"], msg["policy"])
+    # Save base policy in ACL manager so rules can merge on top
+    if ACL_MANAGER_KEY in hass.data:
+        hass.data[ACL_MANAGER_KEY].save_base_policy(group.id, msg["policy"])
     connection.send_message(
         websocket_api.result_message(msg["id"], {"group": _group_info(group)})
     )
@@ -222,6 +226,10 @@ async def websocket_group_update(
             )
         )
         return
+
+    # Update base policy in ACL manager if policy was changed
+    if msg.get("policy") is not None and ACL_MANAGER_KEY in hass.data:
+        hass.data[ACL_MANAGER_KEY].save_base_policy(group.id, msg["policy"])
 
     connection.send_message(
         websocket_api.result_message(msg["id"], {"group": _group_info(group)})

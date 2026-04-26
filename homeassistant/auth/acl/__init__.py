@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.util import dt as dt_util
 
+from ..permissions.merge import merge_policies
 from ..permissions.types import PolicyType
 from .conditions import evaluate_conditions
 from .models import ACLRule
@@ -14,16 +15,24 @@ from .store import ACLStore
 
 
 class ACLManager:
-    """Manage ACL rules and compile them into group policies."""
+    """Manage ACL rules and compile them into group policies.
+
+    ACL rules are compiled into a policy dict and merged with the
+    group's base policy. The base policy is the policy that was set
+    when the group was created or last updated directly (not via rules).
+    """
 
     def __init__(self, hass: HomeAssistant) -> None:
         """Initialize the ACL manager."""
         self.hass = hass
         self._store = ACLStore(hass)
+        self._base_policies: dict[str, PolicyType] = {}
 
     async def async_load(self) -> None:
         """Load ACL data."""
         await self._store.async_load()
+        # Restore base policies from persistent store
+        self._base_policies = dict(self._store._base_policies)  # noqa: SLF001
 
     def async_get_rules(self, role_id: str | None = None) -> list[ACLRule]:
         """Get rules, optionally filtered by role."""
@@ -180,12 +189,33 @@ class ACLManager:
 
         return dict(merge_policies(policies))
 
+    def save_base_policy(self, role_id: str, policy: PolicyType) -> None:
+        """Save the base policy for a group.
+
+        Called when a group's policy is set directly (not via rules).
+        This preserves the base so that rule compilation can merge on top.
+        """
+        self._base_policies[role_id] = dict(policy)
+        self._store.async_save_base_policy(role_id, dict(policy))
+
     async def _async_compile_and_update_group(self, role_id: str) -> None:
-        """Compile rules for a role and update the group's policy."""
+        """Compile rules for a role and merge with the base policy."""
         auth = self.hass.auth  # type: ignore[attr-defined]
         group = await auth.async_get_group(role_id)
         if group is None or group.system_generated:
             return
 
-        policy = self.compile_rules_to_policy(role_id)
-        await auth.async_update_group(group, policy=policy)
+        rules_policy = self.compile_rules_to_policy(role_id)
+
+        # Get the base policy (saved when the group was created/updated)
+        base = self._base_policies.get(role_id, {})
+
+        if rules_policy and base:
+            # Merge: rules on top of base policy
+            merged = merge_policies([base, rules_policy])
+        elif rules_policy:
+            merged = rules_policy
+        else:
+            merged = base
+
+        await auth.async_update_group(group, policy=merged)

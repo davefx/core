@@ -21,6 +21,7 @@ class ACLStore:
         """Initialize the ACL store."""
         self.hass = hass
         self._rules: dict[str, ACLRule] = {}
+        self._base_policies: dict[str, dict] = {}
         self._store = Store[dict[str, Any]](
             hass, STORAGE_VERSION, STORAGE_KEY, private=True, atomic_writes=True
         )
@@ -40,6 +41,8 @@ class ACLStore:
         for rule_dict in data.get("rules", []):
             rule = ACLRule.from_dict(rule_dict)
             self._rules[rule.id] = rule
+
+        self._base_policies = data.get("base_policies", {})
 
     @callback
     def async_get_rules(self, role_id: str | None = None) -> list[ACLRule]:
@@ -80,8 +83,20 @@ class ACLStore:
         self._store.async_delay_save(self._data_to_save, DEFAULT_SAVE_DELAY)
 
     @callback
+    def async_save_base_policy(self, role_id: str, policy: dict) -> None:
+        """Save a group's base policy."""
+        self._base_policies[role_id] = policy
+        self._async_schedule_save()
+
+    @callback
+    def async_get_base_policy(self, role_id: str) -> dict:
+        """Get a group's saved base policy."""
+        return self._base_policies.get(role_id, {})
+
+    @callback
     def _data_to_save(self) -> dict[str, Any]:
         """Return the data to store."""
         return {
             "rules": [rule.to_dict() for rule in self._rules.values()],
+            "base_policies": self._base_policies,
         }
