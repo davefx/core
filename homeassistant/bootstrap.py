@@ -218,9 +218,6 @@ DEFAULT_INTEGRATIONS = {
     "network",
     "system_health",
     #
-    # ACL management:
-    "acl_fork_manager",
-    #
     # Key-feature:
     "automation",
     "person",
