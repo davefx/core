@@ -83,6 +83,7 @@ from .exceptions import (
     ServiceNotFound,
     ServiceValidationError,
     Unauthorized,
+    UnknownUser,
 )
 from .helpers.json import json_bytes, json_fragment
 from .helpers.typing import VolSchemaType
@@ -2748,6 +2749,27 @@ class ServiceRegistry:
                 handler = self._services[domain][service]
             except KeyError:
                 raise ServiceNotFound(domain, service) from None
+
+        # Enforce service-level access control for user-initiated calls. This
+        # is the single chokepoint every service call passes through, so it
+        # covers entity-platform and non-entity services alike. Internal calls
+        # (automations, scripts, integrations) carry no user_id and are not
+        # subject to per-user permissions. The owner is always exempt; everyone
+        # else must be granted the service, and an absent services policy
+        # denies (fail-closed) — see auth.permissions.util.compile_policy.
+        if context.user_id is not None:
+            user = await self._hass.auth.async_get_user(context.user_id)
+            if user is None:
+                raise UnknownUser(context=context)
+            if not user.is_owner:
+                # Local import: auth imports core, so this avoids an import
+                # cycle at module load. Cached in sys.modules after first call.
+                from .auth.permissions.const import POLICY_CONTROL  # noqa: PLC0415
+
+                if not user.permissions.check_service(
+                    f"{domain}.{service}", POLICY_CONTROL
+                ):
+                    raise Unauthorized(context=context, permission=POLICY_CONTROL)
 
         if return_response:
             if not blocking:

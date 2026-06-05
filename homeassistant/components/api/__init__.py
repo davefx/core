@@ -215,7 +215,7 @@ class APIStatesView(HomeAssistantView):
         """Get current states."""
         user: User = request[KEY_HASS_USER]
         hass = request.app[KEY_HASS]
-        if user.is_admin:
+        if user.is_owner:
             states = (state.as_dict_json for state in hass.states.async_all())
         else:
             entity_perm = user.permissions.check_entity
