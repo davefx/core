@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast, override
 
 import voluptuous as vol
 
-from homeassistant.auth.permissions.const import CAT_ENTITIES, POLICY_CONTROL, CAT_SERVICES
+from homeassistant.auth.permissions.const import CAT_ENTITIES, POLICY_CONTROL
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import (
     ATTR_ENTITY_ID,
@@ -730,19 +730,12 @@ async def _resolve_entity_service_call_entities(
         user = await hass.auth.async_get_user(call.context.user_id)
         if user is None:
             raise UnknownUser(context=call.context)
-        if not user.is_admin:
-            # Check service-level permissions before entity-level,
-            # but only if the user's policy defines a services category.
-            # If no service policy exists, fall through to entity checks.
-            if user.permissions.has_service_policy:
-                service_name = f"{call.domain}.{call.service}"
-                if not user.permissions.check_service(
-                    service_name, POLICY_CONTROL
-                ):
-                    raise Unauthorized(
-                        context=call.context,
-                        permission=POLICY_CONTROL,
-                    )
+        # Service-level permission is enforced centrally in
+        # ServiceRegistry.async_call. Here we only resolve the entity-level
+        # check used to filter the entities this call targets. The owner is
+        # exempt; all other users (including admins) are subject to their
+        # entity policy, so deny rules apply to admin-group members too.
+        if not user.is_owner:
             entity_perms = user.permissions.check_entity
 
     target_all_entities = call.data.get(ATTR_ENTITY_ID) == ENTITY_MATCH_ALL

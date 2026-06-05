@@ -19,6 +19,7 @@ from pytest_unordered import unordered
 import voluptuous as vol
 
 from homeassistant import core as ha
+from homeassistant.auth.permissions import PolicyPermissions
 from homeassistant.const import (
     ATTR_FRIENDLY_NAME,
     EVENT_CALL_SERVICE,
@@ -54,6 +55,7 @@ from homeassistant.exceptions import (
     MaxLengthExceeded,
     ServiceNotFound,
     ServiceValidationError,
+    Unauthorized,
 )
 from homeassistant.helpers.json import json_dumps
 from homeassistant.util import dt as dt_util
@@ -1809,6 +1811,60 @@ async def test_serviceregistry_callback_service(hass: HomeAssistant) -> None:
 
     await hass.services.async_call("test_domain", "REGISTER_CALLS", blocking=True)
     assert len(calls) == 1
+
+
+async def test_serviceregistry_enforces_service_permission(
+    hass: HomeAssistant,
+) -> None:
+    """Test async_call enforces service-level permissions for user calls.
+
+    This is the single chokepoint covering every service (entity-platform and
+    non-entity alike). The owner is exempt; a non-owner is allowed only if
+    their policy grants the service, and an absent services policy denies
+    (fail-closed). Calls without a user_id (automations, scripts, internal)
+    are not subject to per-user permissions.
+    """
+    calls = async_mock_service(hass, "test", "denied")
+
+    # Non-owner whose policy has no services category -> fail-closed.
+    no_service_user = MagicMock(
+        is_owner=False, permissions=PolicyPermissions({"entities": True}, None)
+    )
+    with (
+        patch(
+            "homeassistant.auth.AuthManager.async_get_user",
+            return_value=no_service_user,
+        ),
+        pytest.raises(Unauthorized),
+    ):
+        await hass.services.async_call(
+            "test", "denied", {}, blocking=True, context=ha.Context(user_id="u1")
+        )
+    assert len(calls) == 0
+
+    # Non-owner explicitly granted all services -> allowed.
+    allowed_user = MagicMock(
+        is_owner=False, permissions=PolicyPermissions({"services": True}, None)
+    )
+    with patch(
+        "homeassistant.auth.AuthManager.async_get_user", return_value=allowed_user
+    ):
+        await hass.services.async_call(
+            "test", "denied", {}, blocking=True, context=ha.Context(user_id="u2")
+        )
+    assert len(calls) == 1
+
+    # Owner is always exempt, even with no policy.
+    owner = MagicMock(is_owner=True)
+    with patch("homeassistant.auth.AuthManager.async_get_user", return_value=owner):
+        await hass.services.async_call(
+            "test", "denied", {}, blocking=True, context=ha.Context(user_id="owner")
+        )
+    assert len(calls) == 2
+
+    # Internal call (no user_id) is not subject to permission checks.
+    await hass.services.async_call("test", "denied", {}, blocking=True)
+    assert len(calls) == 3
 
 
 async def test_serviceregistry_remove_service(hass: HomeAssistant) -> None:

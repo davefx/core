@@ -158,7 +158,7 @@ def _forward_events_check_permissions(
     # changed since the subscription was created.
     permissions = user.permissions
     if (
-        not user.is_admin
+        not user.is_owner
         and not permissions.access_all_entities(POLICY_READ)
         and not permissions.check_entity(event.data["entity_id"], POLICY_READ)
     ):
@@ -353,7 +353,7 @@ def _async_get_allowed_states(
     hass: HomeAssistant, connection: ActiveConnection
 ) -> list[State]:
     user = connection.user
-    if user.is_admin or user.permissions.access_all_entities(POLICY_READ):
+    if user.is_owner or user.permissions.access_all_entities(POLICY_READ):
         return hass.states.async_all()
     entity_perm = connection.user.permissions.check_entity
     return [
@@ -425,7 +425,7 @@ def _forward_entity_changes(
     # changed since the subscription was created.
     permissions = user.permissions
     if (
-        not user.is_admin
+        not user.is_owner
         and not permissions.access_all_entities(POLICY_READ)
         and not permissions.check_entity(entity_id, POLICY_READ)
     ):

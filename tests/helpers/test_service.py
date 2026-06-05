@@ -1758,6 +1758,7 @@ async def test_call_context_target_all(
                 {"entities": {"entity_ids": {"light.kitchen": True}}}, None
             ),
             is_admin=False,
+            is_owner=False,
         ),
     ):
         await service.entity_service_call(
@@ -1815,7 +1816,11 @@ async def test_call_context_target_specific_no_auth(
         pytest.raises(exceptions.Unauthorized) as err,
         patch(
             "homeassistant.auth.AuthManager.async_get_user",
-            return_value=Mock(permissions=PolicyPermissions({}, None), is_admin=False),
+            return_value=Mock(
+                permissions=PolicyPermissions({}, None),
+                is_admin=False,
+                is_owner=False,
+            ),
         ),
     ):
         await service.entity_service_call(

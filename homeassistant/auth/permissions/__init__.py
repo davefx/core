@@ -66,11 +66,6 @@ class AbstractPermissions:
         """Return a function that can test automation access."""
         raise NotImplementedError
 
-    @property
-    def has_service_policy(self) -> bool:
-        """Check if a service policy is defined."""
-        return True
-
     def access_all_entities(self, key: str) -> bool:
         """Check if we have a certain access to all entities."""
         raise NotImplementedError
@@ -107,11 +102,6 @@ class PolicyPermissions(AbstractPermissions):
         """Initialize the permission class."""
         self._policy = policy
         self._perm_lookup = perm_lookup
-
-    @property
-    def has_service_policy(self) -> bool:
-        """Check if a service policy is defined in this user's policy."""
-        return CAT_SERVICES in self._policy
 
     def access_all_entities(self, key: str) -> bool:
         """Check if we have a certain access to all entities."""
