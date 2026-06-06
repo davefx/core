@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+import voluptuous as vol
+
+from homeassistant.auth.permissions import POLICY_SCHEMA
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
 
 from .models import ACLRule
+
+_LOGGER = logging.getLogger(__name__)
 
 STORAGE_VERSION = 1
 STORAGE_KEY = "core.acl"
@@ -38,11 +44,26 @@ class ACLStore:
         if data is None:
             return
 
+        # Re-validate persisted data on load. The write path validates rules
+        # and policies, but storage can be edited out-of-band (backups, manual
+        # edits); never feed unvalidated data into the permission engine.
         for rule_dict in data.get("rules", []):
-            rule = ACLRule.from_dict(rule_dict)
+            try:
+                rule = ACLRule.from_dict(rule_dict)
+            except (KeyError, ValueError, TypeError):
+                _LOGGER.warning("Skipping malformed stored ACL rule: %s", rule_dict)
+                continue
             self._rules[rule.id] = rule
 
-        self._base_policies = data.get("base_policies", {})
+        validated_policies: dict[str, dict] = {}
+        for role_id, policy in data.get("base_policies", {}).items():
+            try:
+                validated_policies[role_id] = POLICY_SCHEMA(policy)
+            except vol.Invalid:
+                _LOGGER.warning(
+                    "Dropping invalid stored ACL base policy for role %s", role_id
+                )
+        self._base_policies = validated_policies
 
     @callback
     def async_get_rules(self, role_id: str | None = None) -> list[ACLRule]:

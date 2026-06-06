@@ -2,10 +2,7 @@
 
 from datetime import datetime, time
 
-from homeassistant.auth.acl.conditions import (
-    TimeWindowCondition,
-    evaluate_conditions,
-)
+from homeassistant.auth.acl.conditions import TimeWindowCondition, evaluate_conditions
 
 
 def test_time_window_weekday_match() -> None:
@@ -161,6 +158,24 @@ def test_evaluate_conditions_time_window() -> None:
 
 
 def test_evaluate_conditions_unknown_type() -> None:
-    """Test that unknown condition types fail open."""
+    """Test that unknown condition types fail closed (not met)."""
     conditions = {"type": "unknown_condition"}
-    assert evaluate_conditions(conditions) is True
+    assert evaluate_conditions(conditions) is False
+
+
+def test_evaluate_conditions_malformed_time_window() -> None:
+    """Test that a malformed time_window condition fails closed."""
+    # Missing the required "after"/"before" keys.
+    assert evaluate_conditions({"type": "time_window", "days": ["mon"]}) is False
+    # Unparseable time value.
+    assert (
+        evaluate_conditions(
+            {
+                "type": "time_window",
+                "days": ["mon"],
+                "after": "not-a-time",
+                "before": "17:00",
+            }
+        )
+        is False
+    )
