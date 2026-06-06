@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time
+import logging
 from typing import Any
 
 from homeassistant.util import dt as dt_util
+
+_LOGGER = logging.getLogger(__name__)
 
 WEEKDAY_MAP = {
     "mon": 0,
@@ -75,10 +78,16 @@ class TimeWindowCondition:
         )
 
 
-def evaluate_conditions(conditions: dict[str, Any] | None, now: datetime | None = None) -> bool:
+def evaluate_conditions(
+    conditions: dict[str, Any] | None, now: datetime | None = None
+) -> bool:
     """Evaluate a set of conditions.
 
-    Returns True if all conditions are met, or if no conditions exist.
+    Returns True only when the condition is present and positively met (or
+    when there are no conditions at all). An unknown condition type or a
+    malformed/unparseable condition returns False (fail-closed): a condition
+    we cannot verify is treated as not met, so an allow rule guarded by it
+    does not silently grant access.
     """
     if not conditions:
         return True
@@ -86,8 +95,16 @@ def evaluate_conditions(conditions: dict[str, Any] | None, now: datetime | None 
     condition_type = conditions.get("type")
 
     if condition_type == "time_window":
-        condition = TimeWindowCondition.from_dict(conditions)
+        try:
+            condition = TimeWindowCondition.from_dict(conditions)
+        except (KeyError, ValueError, TypeError):
+            _LOGGER.warning(
+                "Ignoring malformed time_window ACL condition: %s", conditions
+            )
+            return False
         return condition.evaluate(now)
 
-    # Unknown condition type — fail open (allow)
-    return True
+    _LOGGER.warning(
+        "Ignoring ACL rule with unknown condition type %r", condition_type
+    )
+    return False
