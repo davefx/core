@@ -7,9 +7,10 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.auth.acl import ACLManager
-from homeassistant.auth.acl.audit import AuditLevel, AuditLogger
+from homeassistant.auth.acl.audit import AuditAction, AuditLogger
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.start import async_at_started
 
 ACL_MANAGER_KEY = "acl_manager"
 AUDIT_LOGGER_KEY = "acl_audit_logger"
@@ -25,6 +26,17 @@ def async_setup(hass: HomeAssistant) -> bool:
     websocket_api.async_register_command(hass, websocket_acl_effective_permissions)
     websocket_api.async_register_command(hass, websocket_acl_audit_list)
     websocket_api.async_register_command(hass, websocket_acl_audit_clear)
+
+    async def _async_load_manager(hass: HomeAssistant) -> None:
+        """Load the ACL manager at startup so time-window rules track live.
+
+        The manager's periodic recompile (for time-window conditions) only runs
+        once it is loaded; loading here means it does not depend on an admin
+        opening the ACL panel.
+        """
+        await _get_acl_manager(hass).async_load()
+
+    async_at_started(hass, _async_load_manager)
     return True
 
 
@@ -112,6 +124,15 @@ async def websocket_acl_rules_create(
         effect=msg["effect"],
         priority=msg.get("priority", 0),
     )
+
+    logger = _get_audit_logger(hass)
+    await logger.async_load()
+    logger.log_admin_action(
+        AuditAction.RULE_CREATED,
+        user_id=connection.user.id,
+        context={"rule_id": rule.id, "role_id": rule.role_id},
+    )
+
     connection.send_message(
         websocket_api.result_message(msg["id"], {"rule": rule.to_dict()})
     )
@@ -165,6 +186,14 @@ async def websocket_acl_rules_update(
         )
         return
 
+    logger = _get_audit_logger(hass)
+    await logger.async_load()
+    logger.log_admin_action(
+        AuditAction.RULE_UPDATED,
+        user_id=connection.user.id,
+        context={"rule_id": rule.id, "role_id": rule.role_id},
+    )
+
     connection.send_message(
         websocket_api.result_message(msg_id, {"rule": rule.to_dict()})
     )
@@ -194,6 +223,14 @@ async def websocket_acl_rules_delete(
             )
         )
         return
+
+    logger = _get_audit_logger(hass)
+    await logger.async_load()
+    logger.log_admin_action(
+        AuditAction.RULE_DELETED,
+        user_id=connection.user.id,
+        context={"rule_id": msg["rule_id"]},
+    )
 
     connection.send_message(websocket_api.result_message(msg["id"]))
 

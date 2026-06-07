@@ -92,7 +92,7 @@ class AuditLogger:
         self,
         hass: HomeAssistant,
         max_entries: int = DEFAULT_MAX_ENTRIES,
-        level: AuditLevel = AuditLevel.DENIALS_ONLY,
+        level: AuditLevel = AuditLevel.ALL,
     ) -> None:
         """Initialize the audit logger."""
         self.hass = hass

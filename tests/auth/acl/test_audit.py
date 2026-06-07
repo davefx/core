@@ -1,6 +1,6 @@
 """Tests for ACL audit logging."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from homeassistant.auth.acl.audit import (
     AuditAction,
@@ -191,7 +191,7 @@ def test_audit_logger_level_setter() -> None:
     """Test changing audit level."""
     hass = MagicMock()
     logger = AuditLogger(hass)
-    assert logger.level == AuditLevel.DENIALS_ONLY
-
-    logger.level = AuditLevel.ALL
     assert logger.level == AuditLevel.ALL
+
+    logger.level = AuditLevel.DENIALS_ONLY
+    assert logger.level == AuditLevel.DENIALS_ONLY
