@@ -1,7 +1,19 @@
 """Tests for ACL manager."""
 
+from unittest.mock import MagicMock, patch
+
+from freezegun.api import FrozenDateTimeFactory
+
 from homeassistant.auth.acl import ACLManager
 from homeassistant.auth.acl.models import ACLRule
+
+# 2026-04-06 is a Monday.
+_TIME_WINDOW = {
+    "type": "time_window",
+    "days": ["mon"],
+    "after": "09:00:00",
+    "before": "17:00:00",
+}
 
 
 def test_acl_rule_serialization() -> None:
@@ -34,7 +46,6 @@ def test_acl_rule_serialization() -> None:
 
 def test_compile_rules_empty() -> None:
     """Test compiling empty rules produces empty policy."""
-    from unittest.mock import MagicMock
 
     manager = ACLManager.__new__(ACLManager)
     manager._store = MagicMock()
@@ -46,7 +57,6 @@ def test_compile_rules_empty() -> None:
 
 def test_compile_rules_single_allow() -> None:
     """Test compiling a single allow rule."""
-    from unittest.mock import MagicMock
 
     manager = ACLManager.__new__(ACLManager)
     manager._store = MagicMock()
@@ -67,7 +77,6 @@ def test_compile_rules_single_allow() -> None:
 
 def test_compile_rules_deny() -> None:
     """Test compiling a deny rule."""
-    from unittest.mock import MagicMock
 
     manager = ACLManager.__new__(ACLManager)
     manager._store = MagicMock()
@@ -111,7 +120,6 @@ def test_compile_rules_deny() -> None:
 
 def test_compile_rules_multiple_categories() -> None:
     """Test compiling rules across multiple categories."""
-    from unittest.mock import MagicMock
 
     manager = ACLManager.__new__(ACLManager)
     manager._store = MagicMock()
@@ -154,7 +162,6 @@ def test_compile_rules_multiple_categories() -> None:
 
 def test_compile_rules_label_deny() -> None:
     """Test compiling a label-based deny rule."""
-    from unittest.mock import MagicMock
 
     manager = ACLManager.__new__(ACLManager)
     manager._store = MagicMock()
@@ -202,3 +209,81 @@ def test_compile_rules_label_deny() -> None:
             "all": {"read": True, "control": True},
         }
     }
+
+
+def test_compile_rules_time_window(freezer: FrozenDateTimeFactory) -> None:
+    """A time-window rule is compiled only while its window is open."""
+    manager = ACLManager.__new__(ACLManager)
+    manager._store = MagicMock()
+    manager._store.async_get_rules.return_value = [
+        ACLRule(
+            role_id="test-role",
+            category="entities",
+            target_type="all",
+            target_id=None,
+            permission="control",
+            effect="deny",
+            conditions=_TIME_WINDOW,
+        ),
+    ]
+
+    # Monday 12:00 -> inside the window -> the deny rule is active.
+    freezer.move_to("2026-04-06 12:00:00")
+    assert manager.compile_rules_to_policy("test-role") == {
+        "entities": {"all": {"control": False}}
+    }
+
+    # Monday 20:00 -> outside the window -> the rule drops out.
+    freezer.move_to("2026-04-06 20:00:00")
+    assert manager.compile_rules_to_policy("test-role") == {}
+
+
+def test_time_tracking_started_only_with_time_window_rules() -> None:
+    """The periodic recompile timer runs only when a time-window rule exists."""
+    manager = ACLManager.__new__(ACLManager)
+    manager.hass = MagicMock()
+    manager._store = MagicMock()
+    manager._unsub_time = None
+
+    plain_rule = ACLRule(
+        role_id="r",
+        category="entities",
+        target_type="all",
+        target_id=None,
+        permission="read",
+        effect="allow",
+    )
+    timed_rule = ACLRule(
+        role_id="r",
+        category="entities",
+        target_type="all",
+        target_id=None,
+        permission="control",
+        effect="deny",
+        conditions=_TIME_WINDOW,
+    )
+
+    # No time-window rule -> no timer scheduled.
+    manager._store.async_get_rules.return_value = [plain_rule]
+    with patch("homeassistant.auth.acl.async_track_time_interval") as track:
+        manager._async_setup_time_tracking()
+        track.assert_not_called()
+    assert manager._unsub_time is None
+
+    # A time-window rule -> timer scheduled.
+    unsub = MagicMock()
+    manager._store.async_get_rules.return_value = [timed_rule]
+    with patch(
+        "homeassistant.auth.acl.async_track_time_interval", return_value=unsub
+    ) as track:
+        manager._async_setup_time_tracking()
+        track.assert_called_once()
+    assert manager._unsub_time is unsub
+
+    # Time-window rule removed -> existing timer cancelled.
+    manager._store.async_get_rules.return_value = [plain_rule]
+    with patch("homeassistant.auth.acl.async_track_time_interval") as track:
+        manager._async_setup_time_tracking()
+        track.assert_not_called()
+    unsub.assert_called_once()
+    assert manager._unsub_time is None

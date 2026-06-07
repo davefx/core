@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
 from ..permissions.merge import merge_policies
@@ -12,6 +14,9 @@ from ..permissions.types import PolicyType
 from .conditions import evaluate_conditions
 from .models import ACLRule
 from .store import ACLStore
+
+# Time-window conditions are minute-precision, so re-evaluate at that cadence.
+TIME_RECOMPILE_INTERVAL = timedelta(minutes=1)
 
 
 class ACLManager:
@@ -27,12 +32,14 @@ class ACLManager:
         self.hass = hass
         self._store = ACLStore(hass)
         self._base_policies: dict[str, PolicyType] = {}
+        self._unsub_time: CALLBACK_TYPE | None = None
 
     async def async_load(self) -> None:
         """Load ACL data."""
         await self._store.async_load()
         # Restore base policies from persistent store
         self._base_policies = dict(self._store._base_policies)  # noqa: SLF001
+        self._async_setup_time_tracking()
 
     def async_get_rules(self, role_id: str | None = None) -> list[ACLRule]:
         """Get rules, optionally filtered by role."""
@@ -66,6 +73,7 @@ class ACLManager:
         )
         self._store.async_create_rule(rule)
         await self._async_compile_and_update_group(role_id)
+        self._async_setup_time_tracking()
         return rule
 
     async def async_update_rule(
@@ -100,6 +108,7 @@ class ACLManager:
         if old_role_id != rule.role_id:
             await self._async_compile_and_update_group(old_role_id)
 
+        self._async_setup_time_tracking()
         return rule
 
     async def async_delete_rule(self, rule_id: str) -> bool:
@@ -111,6 +120,7 @@ class ACLManager:
         role_id = rule.role_id
         self._store.async_delete_rule(rule_id)
         await self._async_compile_and_update_group(role_id)
+        self._async_setup_time_tracking()
         return True
 
     @callback
@@ -174,8 +184,6 @@ class ACLManager:
         Useful for debugging: shows the compiled result after merging all
         group policies for the user.
         """
-        from ..permissions import merge_policies
-
         auth = self.hass.auth  # type: ignore[attr-defined]
         # We can't await here since this is a callback, so we access
         # the store directly
@@ -218,4 +226,49 @@ class ACLManager:
         else:
             merged = base
 
+        # Skip the write when nothing changed. The periodic time-window
+        # recompile calls this every minute, so guarding here avoids needless
+        # persistence and permission-cache invalidation when no window flipped.
+        if group.policy == merged:
+            return
+
         await auth.async_update_group(group, policy=merged)
+
+    @callback
+    def _async_time_conditioned_roles(self) -> set[str]:
+        """Return role IDs that have at least one time-window rule."""
+        return {
+            rule.role_id
+            for rule in self._store.async_get_rules()
+            if rule.conditions and rule.conditions.get("type") == "time_window"
+        }
+
+    @callback
+    def _async_setup_time_tracking(self) -> None:
+        """(Re)start the periodic recompile when time-window rules exist.
+
+        Time-window conditions decide whether a rule is active *right now*, but
+        the compiled group policy is a static snapshot. We re-evaluate it once a
+        minute (windows are minute-precision) so a window opening or closing
+        takes effect live, without an admin having to touch the rule. The timer
+        only runs while at least one time-window rule exists.
+        """
+        if self._unsub_time is not None:
+            self._unsub_time()
+            self._unsub_time = None
+
+        if not self._async_time_conditioned_roles():
+            return
+
+        self._unsub_time = async_track_time_interval(
+            self.hass,
+            self._async_recompile_time_conditioned_roles,
+            TIME_RECOMPILE_INTERVAL,
+        )
+
+    async def _async_recompile_time_conditioned_roles(
+        self, now: datetime | None = None
+    ) -> None:
+        """Recompile roles whose time-window conditions may have flipped."""
+        for role_id in self._async_time_conditioned_roles():
+            await self._async_compile_and_update_group(role_id)
