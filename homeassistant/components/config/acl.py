@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import time
 from typing import Any
 
 import voluptuous as vol
@@ -14,6 +15,35 @@ from homeassistant.helpers.start import async_at_started
 
 ACL_MANAGER_KEY = "acl_manager"
 AUDIT_LOGGER_KEY = "acl_audit_logger"
+
+_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _valid_time(value: Any) -> str:
+    """Validate an HH:MM[:SS] time string (as the condition store expects)."""
+    if not isinstance(value, str):
+        raise vol.Invalid("Expected a time string")
+    try:
+        time.fromisoformat(value)
+    except ValueError as err:
+        raise vol.Invalid("Invalid time, expected HH:MM[:SS]") from err
+    return value
+
+
+# A rule may optionally carry a condition that gates when it is active. Only
+# time_window is supported today; unknown shapes are rejected here so the
+# permission engine never sees an unvalidated condition.
+CONDITIONS_SCHEMA = vol.Any(
+    None,
+    vol.Schema(
+        {
+            vol.Required("type"): "time_window",
+            vol.Required("days"): vol.All([vol.In(_WEEKDAYS)], vol.Length(min=1)),
+            vol.Required("after"): _valid_time,
+            vol.Required("before"): _valid_time,
+        }
+    ),
+)
 
 
 @callback
@@ -103,6 +133,7 @@ async def websocket_acl_rules_list(
         ),
         vol.Required("effect"): vol.In(["allow", "deny"]),
         vol.Optional("priority", default=0): int,
+        vol.Optional("conditions"): CONDITIONS_SCHEMA,
     }
 )
 @websocket_api.async_response
@@ -123,6 +154,7 @@ async def websocket_acl_rules_create(
         permission=msg["permission"],
         effect=msg["effect"],
         priority=msg.get("priority", 0),
+        conditions=msg.get("conditions"),
     )
 
     logger = _get_audit_logger(hass)
@@ -161,6 +193,7 @@ async def websocket_acl_rules_create(
         ),
         vol.Optional("effect"): vol.In(["allow", "deny"]),
         vol.Optional("priority"): int,
+        vol.Optional("conditions"): CONDITIONS_SCHEMA,
     }
 )
 @websocket_api.async_response
