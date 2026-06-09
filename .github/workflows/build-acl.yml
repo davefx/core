@@ -59,38 +59,43 @@ jobs:
             echo "New version detected: ${VERSION}"
           fi
 
-  merge-patches:
-    name: Merge ACL patches
+  rebase-patches:
+    name: Rebase ACL patches onto release
     needs: check-release
     if: needs.check-release.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     outputs:
-      merge_sha: ${{ steps.merge.outputs.sha }}
+      head_sha: ${{ steps.rebase.outputs.sha }}
     steps:
-      - name: Checkout official release
+      - name: Checkout ACL patches branch
         uses: actions/checkout@v4
         with:
-          repository: home-assistant/core
-          ref: ${{ needs.check-release.outputs.version }}
+          ref: ${{ env.ACL_BRANCH }}
           fetch-depth: 0
 
-      - name: Add fork remote and merge ACL branch
-        id: merge
+      - name: Rebase ACL patches onto release and push
+        id: rebase
         run: |
           git config user.name "ACL Builder"
           git config user.email "acl-builder@users.noreply.github.com"
 
-          # Add our fork with the ACL patches
-          git remote add fork https://github.com/${{ github.repository }}.git
-          git fetch fork ${{ env.ACL_BRANCH }}
+          # Bring in the upstream release tag to rebase onto.
+          git remote add upstream https://github.com/home-assistant/core.git
+          git fetch --no-tags upstream tag "${{ needs.check-release.outputs.version }}"
 
-          # Attempt merge
-          if git merge fork/${{ env.ACL_BRANCH }} --no-edit -m "Merge ACL patches onto ${{ needs.check-release.outputs.version }}"; then
+          # Replay the ACL commits on top of the new release. This keeps the
+          # branch a clean, linear series of ACL patches (no merge commits) so
+          # the patches stay reviewable for upstreaming and the published image
+          # is always the stable release plus our patches.
+          if git rebase "${{ needs.check-release.outputs.version }}"; then
+            git push origin "${{ env.ACL_BRANCH }}" --force-with-lease
             echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            echo "Merge successful"
+            echo "Rebased ${{ env.ACL_BRANCH }} onto ${{ needs.check-release.outputs.version }}"
           else
-            echo "Merge conflict detected!"
-            git merge --abort
+            echo "Rebase hit conflicts; manual resolution required."
+            git rebase --abort
             exit 1
           fi
 
@@ -104,16 +109,16 @@ jobs:
           pip install orjson
           python3 -m script.translations develop --all
 
-      - name: Upload merged source
+      - name: Upload patched source
         uses: actions/upload-artifact@v4
         with:
-          name: merged-source
+          name: patched-source
           path: .
           retention-days: 1
 
   build-base:
     name: Build base (${{ matrix.arch }})
-    needs: [check-release, merge-patches]
+    needs: [check-release, rebase-patches]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -123,10 +128,10 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     steps:
-      - name: Download merged source
+      - name: Download patched source
         uses: actions/download-artifact@v4
         with:
-          name: merged-source
+          name: patched-source
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -168,10 +173,10 @@ jobs:
             arch: aarch64
             runner: ubuntu-24.04-arm
     steps:
-      - name: Download merged source
+      - name: Download patched source
         uses: actions/download-artifact@v4
         with:
-          name: merged-source
+          name: patched-source
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -251,24 +256,36 @@ jobs:
             -f sha="${{ github.sha }}" || true
 
   notify-failure:
-    name: Notify on merge failure
-    needs: [merge-patches]
+    name: Notify on rebase failure
+    needs: [check-release, rebase-patches]
     if: failure()
     runs-on: ubuntu-24.04
     steps:
-      - name: Create issue for merge conflict
+      - name: Report rebase conflict
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ needs.check-release.outputs.version }}"
-          gh issue create \
-            --repo "${{ github.repository }}" \
-            --title "Merge conflict: ACL patches on ${VERSION}" \
-            --body "The ACL branch (\`${{ env.ACL_BRANCH }}\`) failed to merge cleanly onto HA Core \`${VERSION}\`. Manual resolution is needed.
+          BODY="The ACL branch (\`${{ env.ACL_BRANCH }}\`) failed to rebase cleanly onto HA Core \`${VERSION}\`. Manual resolution is needed.
 
           **Steps to fix:**
-          1. \`git fetch origin && git fetch upstream\`
+          1. \`git fetch fork && git fetch --no-tags upstream tag ${VERSION}\`
           2. \`git checkout ${{ env.ACL_BRANCH }}\`
-          3. \`git merge ${VERSION}\`
-          4. Resolve conflicts, commit, and push
-          5. Re-run the workflow"
+          3. \`git rebase ${VERSION}\`
+          4. Resolve conflicts, then \`git rebase --continue\`
+          5. \`git push fork ${{ env.ACL_BRANCH }} --force-with-lease\`
+          6. Re-run the workflow"
+
+          # Always surface the runbook in the run summary (works even when
+          # repo issues are disabled).
+          {
+            echo "## Rebase conflict: ACL patches on ${VERSION}"
+            echo ""
+            echo "${BODY}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Best-effort issue; ignore failure if issues are disabled on the repo.
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "Rebase conflict: ACL patches on ${VERSION}" \
+            --body "${BODY}" || echo "Could not open an issue (issues may be disabled); see the run summary above."
