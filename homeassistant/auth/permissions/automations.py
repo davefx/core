@@ -1,7 +1,5 @@
 """Automation, script, and scene permissions."""
 
-from __future__ import annotations
-
 from collections import OrderedDict
 from collections.abc import Callable
 
@@ -64,20 +62,46 @@ def _lookup_automation_label(
     labels_dict: SubCategoryDict,
     entity_id: str,
 ) -> ValueType | None:
-    """Look up automation permission by label."""
+    """Look up automation permission by label.
+
+    An automation/script/scene can have multiple labels. Permissions from all
+    matching labels are merged with deny-overrides-allow semantics, mirroring
+    the entity label lookup: a deny on any label wins regardless of label set
+    iteration order (labels are an unordered set).
+    """
     entity_entry = perm_lookup.entity_registry.async_get(entity_id)
 
     if entity_entry is None or not entity_entry.labels:
         return None
 
+    matching: list[ValueType] = []
     for label in entity_entry.labels:
         label_perm = labels_dict.get(label)
         if label_perm is not None:
-            if label_perm is False:
-                return False
-            return label_perm
+            matching.append(label_perm)
 
-    return None
+    if not matching:
+        return None
+
+    # Deny (False) on any label wins.
+    if any(perm is False for perm in matching):
+        return False
+
+    # Allow-all (True) with no deny wins.
+    if any(perm is True for perm in matching):
+        return True
+
+    # All matches are dicts — merge per key, deny wins.
+    merged: dict[str, bool] = {}
+    for perm in matching:
+        assert isinstance(perm, dict)
+        for key, value in perm.items():
+            if key not in merged:
+                merged[key] = value
+            elif value is False:
+                merged[key] = False
+
+    return merged or None
 
 
 def compile_automations(
