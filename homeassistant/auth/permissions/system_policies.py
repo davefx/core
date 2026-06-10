@@ -4,7 +4,6 @@ from .const import (
     CAT_AUTOMATIONS,
     CAT_ENTITIES,
     CAT_SERVICES,
-    POLICY_CONTROL,
     POLICY_READ,
     POLICY_TRIGGER,
     SUBCAT_ALL,
