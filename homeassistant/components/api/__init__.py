@@ -388,6 +388,7 @@ class APIDomainServicesView(HomeAssistantView):
         Returns a list of changed states.
         """
         hass = request.app[KEY_HASS]
+        user: User = request[KEY_HASS_USER]
         body = await request.text()
         try:
             data = json_loads(body) if body else None
@@ -426,6 +427,12 @@ class APIDomainServicesView(HomeAssistantView):
             event: Event[EventStateChangedData],
         ) -> None:
             if event.context == context and (state := event.data["new_state"]):
+                # Don't leak states the caller can't read. The owner sees all;
+                # everyone else is filtered by their entity read permission.
+                if not user.is_owner and not user.permissions.check_entity(
+                    state.entity_id, POLICY_READ
+                ):
+                    return
                 changed_states.append(state.json_fragment)
 
         cancel_listen = hass.bus.async_listen(
