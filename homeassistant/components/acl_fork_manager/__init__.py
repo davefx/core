@@ -10,12 +10,11 @@ ACL-patched fork. Runs as a background service that:
 4. Registers the ACL management panel in the sidebar.
 """
 
-from __future__ import annotations
-
+from datetime import datetime
 import logging
 import os
 from pathlib import Path
-from datetime import datetime
+import re
 
 import aiohttp
 
@@ -37,6 +36,11 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# A fork version must look like a HA Core version (e.g. 2026.6.2[bN]). The
+# manifest is fetched over the network, so never hand an unvalidated string to
+# the Supervisor update API.
+_VERSION_RE = re.compile(r"\d{4}\.\d{1,2}\.\d+(?:b\d+)?$")
 
 PANEL_URL = "/acl_fork_manager/acl-panel.js"
 PANEL_PATH = Path(__file__).parent / "frontend" / "acl-panel.js"
@@ -198,6 +202,11 @@ class ForkUpdateManager:
 
         # Check if a newer version is available
         fork_version = await self._fetch_fork_version(machine)
+        if fork_version and not _VERSION_RE.fullmatch(fork_version):
+            _LOGGER.error(
+                "Ignoring malformed fork version %r from manifest", fork_version
+            )
+            fork_version = None
         if fork_version and fork_version != current_version:
             _LOGGER.info(
                 "New ACL fork version available: %s (current: %s)",
