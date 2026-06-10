@@ -74,6 +74,10 @@ jobs:
         with:
           ref: ${{ env.ACL_BRANCH }}
           fetch-depth: 0
+          # Rebasing onto a release pulls in upstream's .github/workflows/*,
+          # which the default GITHUB_TOKEN may not push. Use a PAT carrying the
+          # workflow scope so the force-push of acl-patches succeeds.
+          token: ${{ secrets.ACL_PUSH_TOKEN }}
 
       - name: Rebase ACL patches onto release and push
         id: rebase
