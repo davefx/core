@@ -1,19 +1,23 @@
 """ACL rule management for Home Assistant."""
 
-from __future__ import annotations
-
 from datetime import datetime, timedelta
+import logging
 from typing import Any
+
+import voluptuous as vol
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
+from ..permissions import POLICY_SCHEMA
 from ..permissions.merge import merge_policies
 from ..permissions.types import PolicyType
 from .conditions import evaluate_conditions
-from .models import ACLRule
+from .models import ACLRule, validate_rule_shape
 from .store import ACLStore
+
+_LOGGER = logging.getLogger(__name__)
 
 # Time-window conditions are minute-precision, so re-evaluate at that cadence.
 TIME_RECOMPILE_INTERVAL = timedelta(minutes=1)
@@ -61,6 +65,9 @@ class ACLManager:
         conditions: dict | None = None,
     ) -> ACLRule:
         """Create a new ACL rule and update the group's policy."""
+        # Reject category/target_type/permission mismatches up front so a rule
+        # that would compile to a silently-dead policy is never stored.
+        validate_rule_shape(category, target_type, permission, effect)
         rule = ACLRule(
             role_id=role_id,
             category=category,
@@ -87,6 +94,16 @@ class ACLManager:
             return None
 
         old_role_id = rule.role_id
+
+        # Validate the resulting shape (existing values overlaid with the
+        # update) before mutating, so a partial update can't push the rule
+        # into an invalid category/target_type/permission combination.
+        validate_rule_shape(
+            kwargs.get("category", rule.category),
+            kwargs.get("target_type", rule.target_type),
+            kwargs.get("permission", rule.permission),
+            kwargs.get("effect", rule.effect),
+        )
 
         for attr in (
             "category",
@@ -134,15 +151,25 @@ class ACLManager:
         if not all_rules:
             return {}
 
-        # Filter out rules whose conditions are not currently met
-        rules = [
-            r for r in all_rules if evaluate_conditions(r.conditions)
-        ]
+        # Drop rules whose condition is not currently met. For an allow rule
+        # this removes access (fail-closed); for a deny with a time_window it
+        # means "deny only during the window", which is the intended model.
+        # Malformed conditions are rejected at write/load time, so they cannot
+        # reach here and silently drop a deny.
+        rules = [r for r in all_rules if evaluate_conditions(r.conditions)]
         if not rules:
             return {}
 
-        # Sort by priority (lower = higher priority, processed first)
+        # Deterministic order; deny-overrides (below) makes the result
+        # independent of order, so a deny can never be clobbered by an allow
+        # on the same target+permission regardless of priority.
         rules.sort(key=lambda r: r.priority)
+
+        def _apply(entry: dict[str, Any], perm: str, allow: bool) -> None:
+            """Set a permission with deny-overrides: a deny always wins."""
+            if entry.get(perm) is False:
+                return
+            entry[perm] = allow
 
         policy: dict[str, Any] = {}
 
@@ -151,7 +178,7 @@ class ACLManager:
             target_type = rule.target_type
             target_id = rule.target_id
             permission = rule.permission
-            value = rule.effect == "allow"
+            allow = rule.effect == "allow"
 
             if category not in policy:
                 policy[category] = {}
@@ -159,11 +186,10 @@ class ACLManager:
             cat_policy = policy[category]
 
             if target_type == "all":
-                # Set permission on the "all" subcategory
                 if "all" not in cat_policy:
                     cat_policy["all"] = {}
                 if isinstance(cat_policy["all"], dict):
-                    cat_policy["all"][permission] = value
+                    _apply(cat_policy["all"], permission, allow)
             elif target_id is not None:
                 if target_type not in cat_policy:
                     cat_policy[target_type] = {}
@@ -173,7 +199,7 @@ class ACLManager:
                         target_dict[target_id] = {}
                     target_entry = target_dict[target_id]
                     if isinstance(target_entry, dict):
-                        target_entry[permission] = value
+                        _apply(target_entry, permission, allow)
 
         return policy
 
@@ -225,6 +251,20 @@ class ACLManager:
             merged = rules_policy
         else:
             merged = base
+
+        # Never push a policy the permission engine can't represent. A rule
+        # whose category/target_type/permission don't line up compiles into a
+        # shape POLICY_SCHEMA rejects (and would otherwise be a silently-dead
+        # restriction). Refuse rather than apply a broken policy.
+        try:
+            merged = POLICY_SCHEMA(merged)
+        except vol.Invalid as err:
+            _LOGGER.error(
+                "Refusing to apply invalid compiled ACL policy for role %s: %s",
+                role_id,
+                err,
+            )
+            return
 
         # Skip the write when nothing changed. The periodic time-window
         # recompile calls this every minute, so guarding here avoids needless

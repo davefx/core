@@ -1,13 +1,46 @@
 """Models for ACL rules."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 import uuid
 
 from homeassistant.util import dt as dt_util
+
+EFFECTS = ("allow", "deny")
+
+# Which target_type / permission values the permission engine can actually
+# represent for each category. A rule outside these sets compiles into a
+# policy shape the engine ignores (a silently-dead restriction), so it is
+# rejected at the API and dropped on load.
+TARGET_TYPES_BY_CATEGORY: dict[str, set[str]] = {
+    "entities": {"all", "entity_ids", "device_ids", "area_ids", "label_ids", "domains"},
+    "services": {"all", "service_ids", "domains"},
+    "automations": {"all", "entity_ids", "label_ids"},
+}
+PERMISSIONS_BY_CATEGORY: dict[str, set[str]] = {
+    "entities": {"read", "control", "edit"},
+    "services": {"read", "control"},
+    "automations": {"read", "edit", "trigger"},
+}
+
+
+def validate_rule_shape(
+    category: str, target_type: str, permission: str, effect: str
+) -> None:
+    """Raise ValueError if the category/target_type/permission/effect mismatch."""
+    if category not in TARGET_TYPES_BY_CATEGORY:
+        raise ValueError(f"invalid ACL category {category!r}")
+    if effect not in EFFECTS:
+        raise ValueError(f"invalid ACL effect {effect!r}")
+    if target_type not in TARGET_TYPES_BY_CATEGORY[category]:
+        raise ValueError(
+            f"target_type {target_type!r} is not valid for category {category!r}"
+        )
+    if permission not in PERMISSIONS_BY_CATEGORY[category]:
+        raise ValueError(
+            f"permission {permission!r} is not valid for category {category!r}"
+        )
 
 
 @dataclass(slots=True)
@@ -46,7 +79,13 @@ class ACLRule:
 
     @classmethod
     def from_dict(cls, data: dict) -> ACLRule:
-        """Deserialize from storage dict."""
+        """Deserialize from storage dict, rejecting semantically invalid rules."""
+        validate_rule_shape(
+            data["category"], data["target_type"], data["permission"], data["effect"]
+        )
+        conditions = data.get("conditions")
+        if conditions is not None and not isinstance(conditions, dict):
+            raise ValueError("ACL rule conditions must be a dict or null")
         return cls(
             id=data["id"],
             role_id=data["role_id"],
@@ -56,7 +95,7 @@ class ACLRule:
             permission=data["permission"],
             effect=data["effect"],
             priority=data.get("priority", 0),
-            conditions=data.get("conditions"),
+            conditions=conditions,
             created_at=dt_util.parse_datetime(data["created_at"]) or dt_util.utcnow(),
             modified_at=dt_util.parse_datetime(data["modified_at"]) or dt_util.utcnow(),
         )

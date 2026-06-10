@@ -3,9 +3,10 @@
 from unittest.mock import MagicMock, patch
 
 from freezegun.api import FrozenDateTimeFactory
+import pytest
 
 from homeassistant.auth.acl import ACLManager
-from homeassistant.auth.acl.models import ACLRule
+from homeassistant.auth.acl.models import ACLRule, validate_rule_shape
 
 # 2026-04-06 is a Monday.
 _TIME_WINDOW = {
@@ -287,3 +288,72 @@ def test_time_tracking_started_only_with_time_window_rules() -> None:
         track.assert_not_called()
     unsub.assert_called_once()
     assert manager._unsub_time is None
+
+
+@pytest.mark.parametrize("priorities", [(0, 10), (10, 0)])
+def test_compile_rules_deny_overrides_same_target(
+    priorities: tuple[int, int],
+) -> None:
+    """A deny beats an allow on the same target+permission, regardless of order."""
+    allow_pri, deny_pri = priorities
+    manager = ACLManager.__new__(ACLManager)
+    manager._store = MagicMock()
+    manager._store.async_get_rules.return_value = [
+        ACLRule(
+            role_id="r",
+            category="entities",
+            target_type="all",
+            target_id=None,
+            permission="control",
+            effect="allow",
+            priority=allow_pri,
+        ),
+        ACLRule(
+            role_id="r",
+            category="entities",
+            target_type="all",
+            target_id=None,
+            permission="control",
+            effect="deny",
+            priority=deny_pri,
+        ),
+    ]
+    # Deny must win in both orderings — priority can't resurrect an allow.
+    assert manager.compile_rules_to_policy("r") == {
+        "entities": {"all": {"control": False}}
+    }
+
+
+def test_validate_rule_shape_rejects_mismatches() -> None:
+    """Category must constrain target_type and permission."""
+    validate_rule_shape("entities", "all", "control", "deny")  # valid
+    validate_rule_shape("services", "service_ids", "control", "allow")  # valid
+    with pytest.raises(ValueError, match="category"):
+        validate_rule_shape("bogus", "all", "read", "deny")
+    with pytest.raises(ValueError, match="effect"):
+        validate_rule_shape("entities", "all", "read", "maybe")
+    with pytest.raises(ValueError, match="target_type"):
+        validate_rule_shape("services", "label_ids", "control", "deny")
+    with pytest.raises(ValueError, match="permission"):
+        validate_rule_shape("entities", "all", "manage", "deny")
+
+
+def test_acl_rule_from_dict_rejects_invalid() -> None:
+    """from_dict drops semantically invalid stored rules."""
+    valid = {
+        "id": "x",
+        "role_id": "r",
+        "category": "entities",
+        "target_type": "all",
+        "target_id": None,
+        "permission": "control",
+        "effect": "deny",
+        "priority": 0,
+        "created_at": "2026-06-01T00:00:00+00:00",
+        "modified_at": "2026-06-01T00:00:00+00:00",
+    }
+    assert ACLRule.from_dict(valid).effect == "deny"
+    with pytest.raises(ValueError, match="permission"):
+        ACLRule.from_dict({**valid, "permission": "manage"})
+    with pytest.raises(ValueError, match="conditions"):
+        ACLRule.from_dict({**valid, "conditions": "not-a-dict"})

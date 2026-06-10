@@ -1,7 +1,5 @@
 """Offer API to configure Home Assistant ACL rules."""
 
-from __future__ import annotations
-
 from typing import Any
 
 import voluptuous as vol
@@ -54,6 +52,26 @@ def _get_audit_logger(hass: HomeAssistant) -> AuditLogger:
         logger = AuditLogger(hass)
         hass.data[AUDIT_LOGGER_KEY] = logger
     return hass.data[AUDIT_LOGGER_KEY]
+
+
+@callback
+def _require_owner(
+    connection: websocket_api.ActiveConnection, msg_id: int
+) -> bool:
+    """Send an error and return False unless the caller is the owner.
+
+    Changing ACL rules changes the authorization policy itself. Since admins
+    are subject to deny rules, allowing an admin to edit rules would let them
+    rewrite the rules that restrict them — so rule mutations are owner-only.
+    """
+    if connection.user.is_owner:
+        return True
+    connection.send_message(
+        websocket_api.error_message(
+            msg_id, "not_owner", "Only the owner can modify ACL rules"
+        )
+    )
+    return False
 
 
 @websocket_api.require_admin
@@ -112,18 +130,29 @@ async def websocket_acl_rules_create(
     msg: dict[str, Any],
 ) -> None:
     """Create an ACL rule."""
+    if not _require_owner(connection, msg["id"]):
+        return
     manager = _get_acl_manager(hass)
     await manager.async_load()
 
-    rule = await manager.async_create_rule(
-        role_id=msg["role_id"],
-        category=msg["category"],
-        target_type=msg["target_type"],
-        target_id=msg.get("target_id"),
-        permission=msg["permission"],
-        effect=msg["effect"],
-        priority=msg.get("priority", 0),
-    )
+    try:
+        rule = await manager.async_create_rule(
+            role_id=msg["role_id"],
+            category=msg["category"],
+            target_type=msg["target_type"],
+            target_id=msg.get("target_id"),
+            permission=msg["permission"],
+            effect=msg["effect"],
+            priority=msg.get("priority", 0),
+            conditions=msg.get("conditions"),
+        )
+    except ValueError as err:
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err)
+            )
+        )
+        return
 
     logger = _get_audit_logger(hass)
     await logger.async_load()
@@ -170,6 +199,8 @@ async def websocket_acl_rules_update(
     msg: dict[str, Any],
 ) -> None:
     """Update an ACL rule."""
+    if not _require_owner(connection, msg["id"]):
+        return
     manager = _get_acl_manager(hass)
     await manager.async_load()
 
@@ -177,7 +208,15 @@ async def websocket_acl_rules_update(
     msg.pop("type")
     rule_id = msg.pop("rule_id")
 
-    rule = await manager.async_update_rule(rule_id, **msg)
+    try:
+        rule = await manager.async_update_rule(rule_id, **msg)
+    except ValueError as err:
+        connection.send_message(
+            websocket_api.error_message(
+                msg_id, websocket_api.ERR_INVALID_FORMAT, str(err)
+            )
+        )
+        return
     if rule is None:
         connection.send_message(
             websocket_api.error_message(
@@ -213,6 +252,8 @@ async def websocket_acl_rules_delete(
     msg: dict[str, Any],
 ) -> None:
     """Delete an ACL rule."""
+    if not _require_owner(connection, msg["id"]):
+        return
     manager = _get_acl_manager(hass)
     await manager.async_load()
 
