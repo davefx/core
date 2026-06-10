@@ -84,22 +84,65 @@ jobs:
         run: |
           git config user.name "ACL Builder"
           git config user.email "acl-builder@users.noreply.github.com"
+          # Reuse recorded conflict resolutions across rebases.
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+
+          VERSION="${{ needs.check-release.outputs.version }}"
 
           # Bring in the upstream release tag to rebase onto.
           git remote add upstream https://github.com/home-assistant/core.git
-          git fetch --no-tags upstream tag "${{ needs.check-release.outputs.version }}"
+          git fetch --no-tags upstream tag "$VERSION"
 
-          # Replay the ACL commits on top of the new release. This keeps the
-          # branch a clean, linear series of ACL patches (no merge commits) so
-          # the patches stay reviewable for upstreaming and the published image
-          # is always the stable release plus our patches.
-          if git rebase "${{ needs.check-release.outputs.version }}"; then
+          # Restore the shared rerere cache (branch rerere-cache) so conflicts
+          # resolved before replay automatically here.
+          rr="$(git rev-parse --git-path rr-cache)"
+          mkdir -p "$rr"
+          if git fetch origin rerere-cache 2>/dev/null; then
+            git archive FETCH_HEAD | tar -x -C "$rr" || true
+          fi
+
+          # Persist newly recorded resolutions back to the shared cache.
+          save_rerere() {
+            local idx tree commit parent=""
+            if git fetch origin rerere-cache 2>/dev/null; then
+              git archive FETCH_HEAD | tar -x -C "$rr" || true
+              parent="-p FETCH_HEAD"
+            fi
+            idx="$(mktemp)"; rm -f "$idx"
+            GIT_INDEX_FILE="$idx" git --work-tree="$rr" add -A 2>/dev/null \
+              || { rm -f "$idx"; return 0; }
+            tree="$(GIT_INDEX_FILE="$idx" git write-tree)"; rm -f "$idx"
+            commit="$(git commit-tree "$tree" $parent -m "Update shared rerere cache")"
+            git push origin "$commit:refs/heads/rerere-cache" || true
+          }
+
+          # Replay the ACL commits on top of the new release, keeping a clean
+          # linear series. rerere auto-resolves conflicts it has seen before;
+          # we only stop (and fail) for genuinely new, unresolved conflicts.
+          ok=true
+          if ! git rebase "$VERSION"; then
+            guard=0
+            while [ -d "$(git rev-parse --git-path rebase-merge)" ] \
+               || [ -d "$(git rev-parse --git-path rebase-apply)" ]; do
+              guard=$((guard + 1))
+              if [ "$guard" -gt 100 ]; then ok=false; break; fi
+              if [ -n "$(git diff --diff-filter=U --name-only)" ]; then
+                ok=false; break
+              fi
+              git add -A
+              GIT_EDITOR=true git rebase --continue >/dev/null 2>&1 || true
+            done
+          fi
+
+          if [ "$ok" = true ]; then
+            save_rerere
             git push origin "${{ env.ACL_BRANCH }}" --force-with-lease
             echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            echo "Rebased ${{ env.ACL_BRANCH }} onto ${{ needs.check-release.outputs.version }}"
+            echo "Rebased ${{ env.ACL_BRANCH }} onto $VERSION"
           else
-            echo "Rebase hit conflicts; manual resolution required."
-            git rebase --abort
+            git rebase --abort 2>/dev/null || true
+            echo "Rebase has conflicts rerere could not resolve; manual resolution required."
             exit 1
           fi
 
@@ -272,13 +315,15 @@ jobs:
           VERSION="${{ needs.check-release.outputs.version }}"
           BODY="The ACL branch (\`${{ env.ACL_BRANCH }}\`) failed to rebase cleanly onto HA Core \`${VERSION}\`. Manual resolution is needed.
 
-          **Steps to fix:**
-          1. \`git fetch fork && git fetch --no-tags upstream tag ${VERSION}\`
-          2. \`git checkout ${{ env.ACL_BRANCH }}\`
-          3. \`git rebase ${VERSION}\`
-          4. Resolve conflicts, then \`git rebase --continue\`
-          5. \`git push fork ${{ env.ACL_BRANCH }} --force-with-lease\`
-          6. Re-run the workflow"
+          **Steps to fix (resolve once; rerere replays it next time):**
+          1. \`git config rerere.enabled true\` (one-time, so the resolution is recorded)
+          2. \`git fetch fork && git fetch --no-tags upstream tag ${VERSION}\`
+          3. \`git checkout ${{ env.ACL_BRANCH }}\`
+          4. \`git rebase ${VERSION}\`
+          5. Resolve conflicts, then \`git rebase --continue\`
+          6. Push the recorded resolution to the shared cache: \`../rerere-cache.sh save\` (workspace helper)
+          7. \`git push fork ${{ env.ACL_BRANCH }} --force-with-lease\`
+          8. Re-run the workflow — CI restores the cache and auto-resolves this conflict"
 
           # Always surface the runbook in the run summary (works even when
           # repo issues are disabled).
