@@ -137,6 +137,29 @@ async def async_record_owner(
         return
     owners[automation_id] = user_id
     await store.async_save(owners)
+
+
+async def async_set_owner(
+    hass: HomeAssistant, automation_id: str, user_id: str
+) -> None:
+    """Set (reassign) the owner of an automation, overriding any existing one.
+
+    Used for ownership transfer / adoption.
+    """
+    store, owners = await _async_load_owners(hass)
+    if owners.get(automation_id) == user_id:
+        return
+    owners[automation_id] = user_id
+    await store.async_save(owners)
+
+
+async def async_remove_owner(hass: HomeAssistant, automation_id: str) -> None:
+    """Drop the owner record when an automation is deleted."""
+    store, owners = await _async_load_owners(hass)
+    if owners.pop(automation_id, None) is not None:
+        await store.async_save(owners)
+
+
 ENTITY_ID_FORMAT = DOMAIN + ".{}"
 
 

@@ -1,6 +1,11 @@
 """Automations run as the invoking user (manual) or their creator (automatic)."""
 
-from homeassistant.components.automation import async_get_owner, async_record_owner
+from homeassistant.components.automation import (
+    async_get_owner,
+    async_record_owner,
+    async_remove_owner,
+    async_set_owner,
+)
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.setup import async_setup_component
 
@@ -64,3 +69,17 @@ async def test_automatic_trigger_runs_as_owner(
     hass.bus.async_fire("auto_evt")  # automatic: no user in context
     await hass.async_block_till_done()
     assert calls[-1].context.user_id == hass_owner_user.id
+
+
+async def test_set_owner_reassigns(hass: HomeAssistant) -> None:
+    """async_set_owner overrides an existing owner (for transfer/adoption)."""
+    await async_record_owner(hass, "a", "user-1")
+    await async_set_owner(hass, "a", "user-2")
+    assert async_get_owner(hass, "a") == "user-2"
+
+
+async def test_remove_owner(hass: HomeAssistant) -> None:
+    """async_remove_owner drops the record (delete cleanup)."""
+    await async_record_owner(hass, "a", "user-1")
+    await async_remove_owner(hass, "a")
+    assert async_get_owner(hass, "a") is None

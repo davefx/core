@@ -8,6 +8,7 @@ from aiohttp import web
 from homeassistant.components.automation import (
     DOMAIN as AUTOMATION_DOMAIN,
     async_record_owner,
+    async_remove_owner,
 )
 from homeassistant.components.automation.config import (  # pylint: disable=home-assistant-component-root-import
     async_validate_config_item,
@@ -33,6 +34,10 @@ def async_setup(hass: HomeAssistant) -> bool:
                 AUTOMATION_DOMAIN, SERVICE_RELOAD, {CONF_ID: config_key}
             )
             return
+
+        # Drop the recorded owner so it can't leak to a future automation
+        # that reuses the id.
+        await async_remove_owner(hass, config_key)
 
         ent_reg = er.async_get(hass)
 
