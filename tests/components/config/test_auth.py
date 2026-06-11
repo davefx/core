@@ -403,6 +403,176 @@ async def test_deactivate_system_generated(
     assert result["error"]["code"] == "cannot_modify_system_generated"
 
 
+async def _delegated_membership_manager(
+    hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> tuple[auth_models.Group, auth_models.User, WebSocketGenerator]:
+    """Build a non-admin manager with manage_members on a target group.
+
+    The manager strictly dominates anyone the group grants (it holds an extra
+    entity), so it can both add and later remove a subordinate member.
+    """
+    member_group = await hass.auth.async_create_group(
+        "Team A",
+        {"entities": {"entity_ids": {"light.kitchen": {"control": True}}}},
+    )
+    mgr_group = await hass.auth.async_create_group(
+        "Managers",
+        {
+            "admin": {
+                "groups": {"group_ids": {member_group.id: {"manage_members": True}}}
+            },
+            "entities": {
+                "entity_ids": {
+                    "light.kitchen": {"control": True},
+                    "light.living": {"control": True},
+                }
+            },
+        },
+    )
+    manager = MockUser(groups=[mgr_group]).add_to_hass(hass)
+    assert not manager.is_admin
+    refresh_token = await hass.auth.async_create_refresh_token(manager, CLIENT_ID)
+    access_token = hass.auth.async_create_access_token(refresh_token)
+    client = await hass_ws_client(hass, access_token)
+    return member_group, manager, client
+
+
+async def test_update_delegated_membership(
+    hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """A non-admin with manage_members may add/remove a dominated user."""
+    member_group, _manager, client = await _delegated_membership_manager(
+        hass, hass_ws_client
+    )
+    # Strict subordinate (no access) -> the manager dominates them.
+    target = await hass.auth.async_create_user("Worker")
+
+    # Add to the managed group -> allowed (within authority, dominates target).
+    await client.send_json(
+        {
+            "id": 5,
+            "type": "config/auth/update",
+            "user_id": target.id,
+            "group_ids": [member_group.id],
+        }
+    )
+    assert (await client.receive_json())["success"]
+    assert [group.id for group in target.groups] == [member_group.id]
+
+    # Remove again -> still allowed (manager outranks the group's grant).
+    await client.send_json(
+        {
+            "id": 6,
+            "type": "config/auth/update",
+            "user_id": target.id,
+            "group_ids": [],
+        }
+    )
+    assert (await client.receive_json())["success"]
+    assert target.groups == []
+
+
+async def test_update_delegated_membership_rejects_account_fields(
+    hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """A delegated manager may touch group_ids only, never account fields."""
+    member_group, _manager, client = await _delegated_membership_manager(
+        hass, hass_ws_client
+    )
+    target = await hass.auth.async_create_user("Worker")
+
+    await client.send_json(
+        {
+            "id": 5,
+            "type": "config/auth/update",
+            "user_id": target.id,
+            "name": "Renamed",
+            "group_ids": [member_group.id],
+        }
+    )
+    result = await client.receive_json()
+    assert not result["success"]
+    assert result["error"]["code"] == "unauthorized"
+    assert target.name == "Worker"
+    assert target.groups == []
+
+
+async def test_update_delegated_membership_rejects_peer(
+    hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """A manager can't move a peer it doesn't strictly dominate."""
+    member_group, _manager, client = await _delegated_membership_manager(
+        hass, hass_ws_client
+    )
+    # Peer holds the manager's full access -> not dominated.
+    peer = MockUser(name="Peer").add_to_hass(hass)
+    peer.mock_policy(
+        {
+            "entities": {
+                "entity_ids": {
+                    "light.kitchen": {"control": True},
+                    "light.living": {"control": True},
+                }
+            }
+        }
+    )
+
+    await client.send_json(
+        {
+            "id": 5,
+            "type": "config/auth/update",
+            "user_id": peer.id,
+            "group_ids": [member_group.id],
+        }
+    )
+    result = await client.receive_json()
+    assert not result["success"]
+    assert result["error"]["code"] == "unauthorized"
+    assert peer.groups == []
+
+
+async def test_update_delegated_membership_rejects_beyond_authority(
+    hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """A manager can't drop a user into a group granting beyond its authority.
+
+    The manager holds manage_members on the group (so can_set_member passes),
+    but the group grants an entity (lock.door) the manager lacks, so the
+    can_grant gate on adds must reject it.
+    """
+    privileged = await hass.auth.async_create_group(
+        "Privileged",
+        {"entities": {"entity_ids": {"lock.door": {"control": True}}}},
+    )
+    mgr_group = await hass.auth.async_create_group(
+        "Managers",
+        {
+            "admin": {
+                "groups": {"group_ids": {privileged.id: {"manage_members": True}}}
+            },
+            "entities": {"entity_ids": {"light.kitchen": {"control": True}}},
+        },
+    )
+    manager = MockUser(groups=[mgr_group]).add_to_hass(hass)
+    refresh_token = await hass.auth.async_create_refresh_token(manager, CLIENT_ID)
+    access_token = hass.auth.async_create_access_token(refresh_token)
+    client = await hass_ws_client(hass, access_token)
+    target = await hass.auth.async_create_user("Worker")
+
+    await client.send_json(
+        {
+            "id": 5,
+            "type": "config/auth/update",
+            "user_id": target.id,
+            "group_ids": [privileged.id],
+        }
+    )
+    result = await client.receive_json()
+    assert not result["success"]
+    assert result["error"]["code"] == "unauthorized"
+    assert target.groups == []
+
+
 async def test_group_update_delegated_manager(
     hass: HomeAssistant, hass_ws_client: WebSocketGenerator
 ) -> None:

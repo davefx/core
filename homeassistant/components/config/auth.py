@@ -10,6 +10,7 @@ from homeassistant.auth.permissions import (
     can_create_groups,
     can_grant,
     can_modify_group,
+    can_set_member,
 )
 from homeassistant.components import websocket_api
 from homeassistant.components.config.acl import ACL_MANAGER_KEY
@@ -34,6 +35,45 @@ def _send_unauthorized(
             "Not authorized to manage this group",
         )
     )
+
+
+async def _authorize_member_update(
+    hass: HomeAssistant,
+    caller: User,
+    target: User,
+    msg: dict[str, Any],
+) -> bool:
+    """Whether a non-admin caller may apply this `config/auth/update`.
+
+    Delegated membership management: a non-admin may change only a user's
+    `group_ids` (never account fields like name / is_active / local_only), and
+    only for groups whose membership they control over a target they dominate.
+    Adding to a group additionally requires authority over that group's policy,
+    so a manager can't drop a user into a more-privileged group.
+    """
+    # Only group membership may be delegated; account fields stay admin-only.
+    if any(field in msg for field in ("name", "is_active", "local_only")):
+        return False
+    if "group_ids" not in msg:
+        return False
+
+    current = {group.id for group in target.groups}
+    requested = set(msg["group_ids"])
+    changed = current ^ requested
+    if not changed:
+        return True
+
+    for group_id in changed:
+        if not can_set_member(caller, group_id, target):
+            return False
+
+    # Adds also require authority over the destination group's policy.
+    for group_id in requested - current:
+        group = await hass.auth.async_get_group(group_id)
+        if group is None or not can_grant(caller, group.policy):
+            return False
+
+    return True
 
 
 @callback
@@ -119,7 +159,6 @@ async def websocket_create(
     )
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "config/auth/update",
@@ -163,6 +202,12 @@ async def websocket_update(
                 "Unable to deactivate owner.",
             )
         )
+        return
+
+    if not connection.user.is_admin and not await _authorize_member_update(
+        hass, connection.user, user, msg
+    ):
+        _send_unauthorized(connection, msg["id"])
         return
 
     msg.pop("type")
