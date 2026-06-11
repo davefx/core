@@ -3,10 +3,16 @@
 from typing import Any
 import uuid
 
-from homeassistant.components.automation import DOMAIN as AUTOMATION_DOMAIN
+from aiohttp import web
+
+from homeassistant.components.automation import (
+    DOMAIN as AUTOMATION_DOMAIN,
+    async_record_owner,
+)
 from homeassistant.components.automation.config import (  # pylint: disable=home-assistant-component-root-import
     async_validate_config_item,
 )
+from homeassistant.components.http import KEY_HASS, KEY_HASS_USER
 from homeassistant.config import AUTOMATION_CONFIG_PATH
 from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import HomeAssistant, callback
@@ -54,6 +60,16 @@ def async_setup(hass: HomeAssistant) -> bool:
 
 class EditAutomationConfigView(EditIdBasedConfigView):
     """Edit automation config."""
+
+    async def post(self, request: web.Request, config_key: str) -> web.Response:
+        """Persist config and record the creating user as the owner."""
+        # The base post is @require_admin, so authorization is unchanged.
+        response = await super().post(request, config_key)
+        if response.status < 400 and (user := request[KEY_HASS_USER]) is not None:
+            # First writer wins, so this records the creator. Automatic
+            # triggers then run with the creator's permissions.
+            await async_record_owner(request.app[KEY_HASS], config_key, user.id)
+        return response
 
     def _write_value(
         self,

@@ -73,6 +73,7 @@ from homeassistant.helpers.service import (
     ReloadServiceHelper,
     async_register_admin_service,
 )
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.trace import (
     TraceElement,
     script_execution_set,
@@ -97,6 +98,45 @@ from .helpers import async_get_blueprints
 from .trace import trace_automation
 
 DATA_COMPONENT: HassKey[EntityComponent[BaseAutomationEntity]] = HassKey(DOMAIN)
+
+# Maps an automation id to the user that created it, so automatic triggers run
+# with that user's permissions ("definer rights"). Persisted across restarts.
+DATA_OWNERS: HassKey[tuple[Store[dict[str, str]], dict[str, str]]] = HassKey(
+    "automation_owners"
+)
+OWNERS_STORAGE_KEY = "automation.owners"
+OWNERS_STORAGE_VERSION = 1
+
+
+async def _async_load_owners(hass: HomeAssistant) -> tuple[Store, dict[str, str]]:
+    """Load the automation-owner registry into hass.data."""
+    if (entry := hass.data.get(DATA_OWNERS)) is not None:
+        return entry
+    store = Store[dict[str, str]](hass, OWNERS_STORAGE_VERSION, OWNERS_STORAGE_KEY)
+    owners = await store.async_load() or {}
+    hass.data[DATA_OWNERS] = entry = (store, owners)
+    return entry
+
+
+@callback
+def async_get_owner(hass: HomeAssistant, automation_id: str | None) -> str | None:
+    """Return the user id that owns (created) an automation, if known."""
+    if automation_id is None or (entry := hass.data.get(DATA_OWNERS)) is None:
+        return None
+    return entry[1].get(automation_id)
+
+
+async def async_record_owner(
+    hass: HomeAssistant, automation_id: str, user_id: str | None
+) -> None:
+    """Record the creator of an automation (first writer wins)."""
+    if user_id is None:
+        return
+    store, owners = await _async_load_owners(hass)
+    if automation_id in owners:
+        return
+    owners[automation_id] = user_id
+    await store.async_save(owners)
 ENTITY_ID_FORMAT = DOMAIN + ".{}"
 
 
@@ -360,6 +400,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         LOGGER, DOMAIN, hass
     )
 
+    await _async_load_owners(hass)
+
     # Register automation as valid domain for Blueprint
     async_get_blueprints(hass)
 
@@ -378,10 +420,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         entity: BaseAutomationEntity, service_call: ServiceCall
     ) -> None:
         """Handle forced automation trigger, e.g. from frontend."""
+        # A manual trigger is an explicit user action, so run it as the
+        # invoking user (invoker rights), not the automation's creator.
         await entity.async_trigger(
             {**service_call.data[ATTR_VARIABLES], "trigger": {"platform": None}},
             skip_condition=service_call.data[CONF_SKIP_CONDITION],
             context=service_call.context,
+            trigger_user_id=service_call.context.user_id,
         )
 
     component.async_register_entity_service(
@@ -494,6 +539,7 @@ class BaseAutomationEntity(ToggleEntity, ABC):
         run_variables: dict[str, Any],
         context: Context | None = None,
         skip_condition: bool = False,
+        trigger_user_id: str | None = None,
     ) -> ScriptRunResult | None:
         """Trigger automation."""
 
@@ -582,6 +628,7 @@ class UnavailableAutomationEntity(BaseAutomationEntity):
         run_variables: dict[str, Any],
         context: Context | None = None,
         skip_condition: bool = False,
+        trigger_user_id: str | None = None,
     ) -> None:
         """Trigger automation."""
 
@@ -775,6 +822,7 @@ class AutomationEntity(BaseAutomationEntity, RestoreEntity):
         run_variables: dict[str, Any],
         context: Context | None = None,
         skip_condition: bool = False,
+        trigger_user_id: str | None = None,
     ) -> ScriptRunResult | None:
         """Trigger automation.
 
@@ -791,7 +839,13 @@ class AutomationEntity(BaseAutomationEntity, RestoreEntity):
 
         # Create a new context referring to the old context.
         parent_id = None if context is None else context.id
-        trigger_context = Context(parent_id=parent_id)
+        # Run as the invoking user for a manual trigger (invoker rights), or as
+        # the automation's creator for an automatic trigger (definer rights);
+        # neither -> system context (legacy/unowned automations).
+        run_as_user_id = trigger_user_id
+        if run_as_user_id is None:
+            run_as_user_id = async_get_owner(self.hass, self.unique_id)
+        trigger_context = Context(user_id=run_as_user_id, parent_id=parent_id)
 
         with trace_automation(
             self.hass,
