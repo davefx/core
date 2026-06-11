@@ -5,10 +5,35 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.auth.models import User
-from homeassistant.auth.permissions import POLICY_SCHEMA
+from homeassistant.auth.permissions import (
+    POLICY_SCHEMA,
+    can_create_groups,
+    can_grant,
+    can_modify_group,
+)
 from homeassistant.components import websocket_api
 from homeassistant.components.config.acl import ACL_MANAGER_KEY
 from homeassistant.core import HomeAssistant, callback
+
+
+async def _group_members(hass: HomeAssistant, group_id: str) -> list[User]:
+    """Return the users who are members of a group."""
+    users = await hass.auth.async_get_users()
+    return [user for user in users if any(g.id == group_id for g in user.groups)]
+
+
+@callback
+def _send_unauthorized(
+    connection: websocket_api.ActiveConnection, msg_id: int
+) -> None:
+    """Reject a management action the caller isn't authorized for."""
+    connection.send_message(
+        websocket_api.error_message(
+            msg_id,
+            websocket_api.ERR_UNAUTHORIZED,
+            "Not authorized to manage this group",
+        )
+    )
 
 
 @callback
@@ -166,7 +191,6 @@ async def websocket_group_list(
     connection.send_message(websocket_api.result_message(msg["id"], result))
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "config/auth/group/create",
@@ -181,6 +205,10 @@ async def websocket_group_create(
     msg: dict[str, Any],
 ) -> None:
     """Create a custom group."""
+    user = connection.user
+    if not can_create_groups(user) or not can_grant(user, msg["policy"]):
+        _send_unauthorized(connection, msg["id"])
+        return
     group = await hass.auth.async_create_group(msg["name"], msg["policy"])
     # Save base policy in ACL manager so rules can merge on top
     if ACL_MANAGER_KEY in hass.data:
@@ -190,7 +218,6 @@ async def websocket_group_create(
     )
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "config/auth/group/update",
@@ -215,6 +242,15 @@ async def websocket_group_update(
         )
         return
 
+    user = connection.user
+    new_policy = msg.get("policy")
+    members = await _group_members(hass, group.id)
+    if not can_modify_group(user, group.id, members) or (
+        new_policy is not None and not can_grant(user, new_policy)
+    ):
+        _send_unauthorized(connection, msg["id"])
+        return
+
     try:
         await hass.auth.async_update_group(
             group, name=msg.get("name"), policy=msg.get("policy")
@@ -236,7 +272,6 @@ async def websocket_group_update(
     )
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "config/auth/group/delete",
@@ -257,6 +292,11 @@ async def websocket_group_delete(
                 msg["id"], websocket_api.ERR_NOT_FOUND, "Group not found"
             )
         )
+        return
+
+    members = await _group_members(hass, group.id)
+    if not can_modify_group(connection.user, group.id, members):
+        _send_unauthorized(connection, msg["id"])
         return
 
     try:

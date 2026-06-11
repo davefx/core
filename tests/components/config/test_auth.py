@@ -401,3 +401,49 @@ async def test_deactivate_system_generated(
     result = await client.receive_json()
     assert not result["success"], result
     assert result["error"]["code"] == "cannot_modify_system_generated"
+
+
+async def test_group_update_delegated_manager(
+    hass: HomeAssistant, hass_ws_client: WebSocketGenerator
+) -> None:
+    """A non-admin with a manage scope can update a group within their authority."""
+    target = await hass.auth.async_create_group(
+        "Target",
+        {"entities": {"entity_ids": {"light.kitchen": {"control": True}}}},
+    )
+    mgr_group = await hass.auth.async_create_group(
+        "Managers",
+        {
+            "admin": {"groups": {"group_ids": {target.id: {"manage": True}}}},
+            "entities": {"entity_ids": {"light.kitchen": {"control": True}}},
+        },
+    )
+    manager = MockUser(groups=[mgr_group]).add_to_hass(hass)
+    assert not manager.is_admin
+    refresh_token = await hass.auth.async_create_refresh_token(manager, CLIENT_ID)
+    access_token = hass.auth.async_create_access_token(refresh_token)
+    client = await hass_ws_client(hass, access_token)
+
+    # Within the manager's own authority -> allowed.
+    await client.send_json(
+        {
+            "id": 5,
+            "type": "config/auth/group/update",
+            "group_id": target.id,
+            "policy": {"entities": {"entity_ids": {"light.kitchen": {"control": False}}}},
+        }
+    )
+    assert (await client.receive_json())["success"]
+
+    # Beyond the manager's authority -> rejected.
+    await client.send_json(
+        {
+            "id": 6,
+            "type": "config/auth/group/update",
+            "group_id": target.id,
+            "policy": {"entities": {"entity_ids": {"lock.door": {"control": True}}}},
+        }
+    )
+    result = await client.receive_json()
+    assert not result["success"]
+    assert result["error"]["code"] == "unauthorized"
