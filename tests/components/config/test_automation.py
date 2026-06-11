@@ -15,7 +15,8 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from homeassistant.util import yaml as yaml_util
 
-from tests.typing import ClientSessionGenerator
+from tests.common import MockUser
+from tests.typing import ClientSessionGenerator, WebSocketGenerator
 
 
 @pytest.fixture
@@ -411,3 +412,81 @@ async def test_api_calls_require_admin(
     # Delete
     resp = await client.delete("/api/config/automation/config/sun")
     assert resp.status == HTTPStatus.UNAUTHORIZED
+
+
+@pytest.mark.parametrize("automation_config", [{}])
+@pytest.mark.usefixtures("setup_automation")
+async def test_set_owner_admin_adopts(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    """An admin can set the run-as owner of an unowned automation."""
+    with patch.object(config, "SECTIONS", [automation]):
+        await async_setup_component(hass, "config", {})
+
+    target = await hass.auth.async_create_user("Target")
+    client = await hass_ws_client(hass)
+
+    await client.send_json(
+        {
+            "id": 6,
+            "type": "config/automation/set_owner",
+            "automation_id": "a1",
+            "user_id": target.id,
+        }
+    )
+    result = await client.receive_json()
+    assert result["success"], result
+    assert automation.async_get_owner(hass, "a1") == target.id
+
+
+@pytest.mark.parametrize("automation_config", [{}])
+@pytest.mark.usefixtures("setup_automation")
+async def test_set_owner_unknown_user(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    """Setting the owner to a nonexistent user is rejected."""
+    with patch.object(config, "SECTIONS", [automation]):
+        await async_setup_component(hass, "config", {})
+
+    client = await hass_ws_client(hass)
+    await client.send_json(
+        {
+            "id": 6,
+            "type": "config/automation/set_owner",
+            "automation_id": "a1",
+            "user_id": "does-not-exist",
+        }
+    )
+    result = await client.receive_json()
+    assert not result["success"]
+    assert result["error"]["code"] == "not_found"
+
+
+@pytest.mark.parametrize("automation_config", [{}])
+@pytest.mark.usefixtures("setup_automation")
+async def test_set_owner_requires_authority(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    hass_read_only_access_token: str,
+) -> None:
+    """A user without authoring authority can't reassign an automation."""
+    with patch.object(config, "SECTIONS", [automation]):
+        await async_setup_component(hass, "config", {})
+
+    target = MockUser(name="Target").add_to_hass(hass)
+    client = await hass_ws_client(hass, hass_read_only_access_token)
+
+    await client.send_json(
+        {
+            "id": 6,
+            "type": "config/automation/set_owner",
+            "automation_id": "a1",
+            "user_id": target.id,
+        }
+    )
+    result = await client.receive_json()
+    assert not result["success"]
+    assert result["error"]["code"] == "unauthorized"
+    assert automation.async_get_owner(hass, "a1") is None
