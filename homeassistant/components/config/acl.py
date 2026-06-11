@@ -6,6 +6,9 @@ import voluptuous as vol
 
 from homeassistant.auth.acl import ACLManager
 from homeassistant.auth.acl.audit import AuditAction, AuditLogger
+from homeassistant.auth.models import User
+from homeassistant.auth.permissions import can_grant, can_modify_group
+from homeassistant.auth.permissions.types import PolicyType
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.start import async_at_started
@@ -54,24 +57,67 @@ def _get_audit_logger(hass: HomeAssistant) -> AuditLogger:
     return hass.data[AUDIT_LOGGER_KEY]
 
 
-@callback
-def _require_owner(
-    connection: websocket_api.ActiveConnection, msg_id: int
-) -> bool:
-    """Send an error and return False unless the caller is the owner.
+def _rule_to_policy(
+    category: str, target_type: str, target_id: str | None, permission: str, effect: str
+) -> PolicyType:
+    """Build the policy fragment a single rule contributes.
 
-    Changing ACL rules changes the authorization policy itself. Since admins
-    are subject to deny rules, allowing an admin to edit rules would let them
-    rewrite the rules that restrict them — so rule mutations are owner-only.
+    Mirrors ACLManager.compile_rules_to_policy for one rule, so the escalation
+    guard (can_grant) can decide whether the caller has authority over exactly
+    the permission this rule sets — in either direction (allow or deny).
     """
-    if connection.user.is_owner:
+    allow = effect == "allow"
+    if target_type == "all":
+        return {category: {"all": {permission: allow}}}
+    return {category: {target_type: {target_id: {permission: allow}}}}
+
+
+async def _role_members(hass: HomeAssistant, role_id: str) -> list[User]:
+    """Return the users who belong to a role (group)."""
+    users = await hass.auth.async_get_users()
+    return [user for user in users if any(g.id == role_id for g in user.groups)]
+
+
+async def _authorize_rule_change(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg_id: int,
+    role_id: str,
+    *policies: PolicyType,
+) -> bool:
+    """Whether the caller may create/update/delete a rule on `role_id`.
+
+    Changing ACL rules changes the authorization policy itself, so this is
+    deliberately strict. The owner always may. Any other caller must:
+
+    * not be a member of the target role — otherwise they could rewrite the
+      very rules that restrict them (the reason rule edits were owner-only,
+      and the one path an admin could use to escape a deny);
+    * be able to modify the role group: hold its `manage` scope AND strictly
+      dominate every member (no restricting a peer or superior); and
+    * have authority (can_grant) over every permission the change touches —
+      both the rule being removed and the one being written — so they can
+      neither escalate access they lack nor sabotage a scope they don't hold.
+    """
+    user = connection.user
+    if user.is_owner:
         return True
-    connection.send_message(
-        websocket_api.error_message(
-            msg_id, "not_owner", "Only the owner can modify ACL rules"
-        )
+
+    members = await _role_members(hass, role_id)
+    authorized = (
+        not any(member.id == user.id for member in members)
+        and can_modify_group(user, role_id, members)
+        and all(can_grant(user, policy) for policy in policies)
     )
-    return False
+    if not authorized:
+        connection.send_message(
+            websocket_api.error_message(
+                msg_id,
+                websocket_api.ERR_UNAUTHORIZED,
+                "Not authorized to modify ACL rules for this role",
+            )
+        )
+    return authorized
 
 
 @websocket_api.require_admin
@@ -98,7 +144,6 @@ async def websocket_acl_rules_list(
     )
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "config/acl/rules/create",
@@ -130,7 +175,16 @@ async def websocket_acl_rules_create(
     msg: dict[str, Any],
 ) -> None:
     """Create an ACL rule."""
-    if not _require_owner(connection, msg["id"]):
+    rule_policy = _rule_to_policy(
+        msg["category"],
+        msg["target_type"],
+        msg.get("target_id"),
+        msg["permission"],
+        msg["effect"],
+    )
+    if not await _authorize_rule_change(
+        hass, connection, msg["id"], msg["role_id"], rule_policy
+    ):
         return
     manager = _get_acl_manager(hass)
     await manager.async_load()
@@ -167,7 +221,6 @@ async def websocket_acl_rules_create(
     )
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "config/acl/rules/update",
@@ -199,14 +252,43 @@ async def websocket_acl_rules_update(
     msg: dict[str, Any],
 ) -> None:
     """Update an ACL rule."""
-    if not _require_owner(connection, msg["id"]):
-        return
     manager = _get_acl_manager(hass)
     await manager.async_load()
 
     msg_id = msg.pop("id")
     msg.pop("type")
     rule_id = msg.pop("rule_id")
+
+    existing = manager.async_get_rule(rule_id)
+    if existing is None:
+        connection.send_message(
+            websocket_api.error_message(
+                msg_id, websocket_api.ERR_NOT_FOUND, "Rule not found"
+            )
+        )
+        return
+
+    # Authorize over both the scope being changed away from and the new scope,
+    # so the caller can't pivot a rule onto a permission they have no authority
+    # over. role_id is immutable via this endpoint, so it comes from the rule.
+    old_policy = _rule_to_policy(
+        existing.category,
+        existing.target_type,
+        existing.target_id,
+        existing.permission,
+        existing.effect,
+    )
+    new_policy = _rule_to_policy(
+        msg.get("category", existing.category),
+        msg.get("target_type", existing.target_type),
+        msg.get("target_id", existing.target_id),
+        msg.get("permission", existing.permission),
+        msg.get("effect", existing.effect),
+    )
+    if not await _authorize_rule_change(
+        hass, connection, msg_id, existing.role_id, old_policy, new_policy
+    ):
+        return
 
     try:
         rule = await manager.async_update_rule(rule_id, **msg)
@@ -238,7 +320,6 @@ async def websocket_acl_rules_update(
     )
 
 
-@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "config/acl/rules/delete",
@@ -252,10 +333,31 @@ async def websocket_acl_rules_delete(
     msg: dict[str, Any],
 ) -> None:
     """Delete an ACL rule."""
-    if not _require_owner(connection, msg["id"]):
-        return
     manager = _get_acl_manager(hass)
     await manager.async_load()
+
+    existing = manager.async_get_rule(msg["rule_id"])
+    if existing is None:
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "Rule not found"
+            )
+        )
+        return
+
+    # Removing a rule changes the role's effective policy too, so it needs the
+    # same authority over the scope the rule touches.
+    rule_policy = _rule_to_policy(
+        existing.category,
+        existing.target_type,
+        existing.target_id,
+        existing.permission,
+        existing.effect,
+    )
+    if not await _authorize_rule_change(
+        hass, connection, msg["id"], existing.role_id, rule_policy
+    ):
+        return
 
     if not await manager.async_delete_rule(msg["rule_id"]):
         connection.send_message(
