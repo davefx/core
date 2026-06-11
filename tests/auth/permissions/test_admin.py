@@ -13,13 +13,19 @@ from homeassistant.auth.permissions import (
     can_grant,
     can_manage_group,
     can_manage_members,
+    can_modify_group,
+    can_set_member,
 )
 
 
-def _user(policy: dict, *, is_admin: bool = False) -> SimpleNamespace:
+def _user(
+    policy: dict, *, is_admin: bool = False, is_owner: bool = False
+) -> SimpleNamespace:
     """Minimal User stand-in with a PolicyPermissions object."""
     return SimpleNamespace(
-        is_admin=is_admin, permissions=PolicyPermissions(policy, None)
+        is_admin=is_admin or is_owner,
+        is_owner=is_owner,
+        permissions=PolicyPermissions(policy, None),
     )
 
 
@@ -154,6 +160,96 @@ def test_can_grant_admin_and_owner_bypass() -> None:
     """Admins and the owner are not constrained by the escalation guard."""
     admin = _user({}, is_admin=True)
     assert can_grant(admin, {"entities": True}) is True
+
+
+def _manager(*entities: str) -> SimpleNamespace:
+    """A non-admin with manage/manage_members on 'team-a' plus entity control."""
+    policy: dict = {
+        "admin": {
+            "groups": {
+                "group_ids": {"team-a": {"manage": True, "manage_members": True}}
+            }
+        },
+        "entities": {"entity_ids": {e: {"control": True} for e in entities}},
+    }
+    return _user(policy)
+
+
+def test_can_modify_group_dominates_subordinate() -> None:
+    """A manager may modify a group whose members it strictly dominates."""
+    manager = _manager("light.a", "light.b")
+    subordinate = _user({"entities": {"entity_ids": {"light.a": {"control": True}}}})
+    assert can_modify_group(manager, "team-a", [manager, subordinate]) is True
+
+
+def test_can_modify_group_blocks_peer_and_superior() -> None:
+    """A manager may not modify a group containing a peer or a superior."""
+    manager = _manager("light.a", "light.b")
+    peer = _manager("light.a", "light.b")  # identical permissions
+    superior = _manager("light.a", "light.b", "lock.door")
+    assert can_modify_group(manager, "team-a", [manager, peer]) is False
+    assert can_modify_group(manager, "team-a", [manager, superior]) is False
+
+
+def test_can_modify_group_blocks_admin_and_owner_members() -> None:
+    """A non-admin can't modify a group containing an admin or the owner."""
+    manager = _manager("light.a")
+    admin = _user({}, is_admin=True)
+    owner = _user({}, is_owner=True)
+    assert can_modify_group(manager, "team-a", [manager, admin]) is False
+    assert can_modify_group(manager, "team-a", [manager, owner]) is False
+
+
+def test_can_modify_group_blocks_real_peer_without_admin_scope() -> None:
+    """A regular member with no admin key is still a protected peer.
+
+    Regression for the admin-key asymmetry: a manager must not dominate a
+    member whose *access* equals their own just because the manager carries an
+    admin scope the member lacks.
+    """
+    manager = _manager("light.a")  # access: control light.a (+ admin scope)
+    peer = _user({"entities": {"entity_ids": {"light.a": {"control": True}}}})  # no admin
+    assert can_modify_group(manager, "team-a", [manager, peer]) is False
+
+
+def test_can_set_member_requires_dominance() -> None:
+    """Membership changes need manage_members AND strict dominance of the target."""
+    manager = _manager("light.a", "light.b")
+    subordinate = _user({"entities": {"entity_ids": {"light.a": {"control": True}}}})
+    peer = _user(
+        {"entities": {"entity_ids": {"light.a": {"control": True}, "light.b": {"control": True}}}}
+    )
+    admin = _user({}, is_admin=True)
+    owner = _user({}, is_owner=True)
+    # Can add/remove a strict subordinate...
+    assert can_set_member(manager, "team-a", subordinate) is True
+    # ...but not a peer, an admin, or the owner (no lock-out by removal).
+    assert can_set_member(manager, "team-a", peer) is False
+    assert can_set_member(manager, "team-a", admin) is False
+    assert can_set_member(manager, "team-a", owner) is False
+    # And not without the manage_members scope.
+    no_scope = _user({"entities": {"entity_ids": {"light.a": {"control": True}}}})
+    assert can_set_member(no_scope, "team-a", subordinate) is False
+
+
+def test_can_modify_group_requires_manage_scope() -> None:
+    """No manage scope -> can't modify regardless of dominance."""
+    no_scope = _user({"entities": {"entity_ids": {"light.a": {"control": True}}}})
+    sub = _user({})
+    assert can_modify_group(no_scope, "team-a", [no_scope, sub]) is False
+
+
+def test_can_modify_group_owner_and_admin() -> None:
+    """The owner dominates everyone; an admin dominates non-admins but not peers."""
+    owner = _user({}, is_owner=True)
+    admin = _user({}, is_admin=True)
+    other_admin = _user({}, is_admin=True)
+    regular = _user({"entities": {"entity_ids": {"light.a": {"control": True}}}})
+    assert can_modify_group(owner, "any", [owner, admin, regular]) is True
+    assert can_modify_group(admin, "any", [admin, regular]) is True
+    # An admin cannot modify a group containing a peer admin (or the owner).
+    assert can_modify_group(admin, "any", [admin, other_admin]) is False
+    assert can_modify_group(admin, "any", [admin, owner]) is False
 
 
 def test_can_grant_deny_holder_is_conservative() -> None:

@@ -48,6 +48,8 @@ __all__ = [
     "can_grant",
     "can_manage_group",
     "can_manage_members",
+    "can_modify_group",
+    "can_set_member",
     "filter_entity_ids_by_permission",
     "merge_policies",
 ]
@@ -237,6 +239,87 @@ def can_manage_members(user: User, group_id: str) -> bool:
     """Whether a user may add/remove members of a group."""
     return user.is_admin or user.permissions.check_group_admin(
         group_id, SCOPE_MANAGE_MEMBERS
+    )
+
+
+def can_set_member(user: User, group_id: str, target: User) -> bool:
+    """Whether `user` may add or remove `target` as a member of a group.
+
+    Needs the manage_members scope AND strict dominance of the target: you
+    can't remove (lock out) a peer/superior, nor pull one out of a shared group
+    to then edit it freely. For an *add*, the caller must also check
+    can_grant(user, group_policy) so a manager can't drop a user into a group
+    that grants or denies beyond the manager's own authority.
+    """
+    return can_manage_members(user, group_id) and _user_dominates(user, target)
+
+
+def can_modify_group(user: User, group_id: str, members: Iterable[User]) -> bool:
+    """Whether `user` may modify a group, given its current member users.
+
+    Beyond holding the `manage` scope, the user must *strictly dominate* every
+    other member, so a manager can't restrict a peer or a more-privileged
+    member of a shared group (the privilege-ordering rule). The owner dominates
+    everyone and can never be dominated.
+    """
+    if not can_manage_group(user, group_id):
+        return False
+    return all(
+        _user_dominates(user, member) for member in members if member is not user
+    )
+
+
+def _has_allow(value: object) -> bool:
+    """Whether a policy value grants anything (a True leaf somewhere)."""
+    if value is True:
+        return True
+    if isinstance(value, dict):
+        return any(_has_allow(item) for item in value.values())
+    return False
+
+
+def _allow_subset(sub: object, sup: object) -> bool:
+    """Whether every allow in `sub` is also allowed by `sup`."""
+    if not _has_allow(sub):
+        return True
+    if sub is True:
+        return sup is True
+    if sup is True:
+        return True
+    if not isinstance(sub, dict) or not isinstance(sup, dict):
+        return False
+    return all(_allow_subset(value, sup.get(key)) for key, value in sub.items())
+
+
+def _user_dominates(superior: User, member: User) -> bool:
+    """Whether `superior` is strictly more privileged than `member`.
+
+    Owner > admin > regular users; among regular users, by proper superset of
+    granted permissions. Conservative: a would-be superior whose own policy has
+    deny carve-outs cannot be shown to dominate (so modification is refused).
+    """
+    if superior is member or superior.is_owner:
+        return True
+    if member.is_owner or member.is_admin:
+        # Nobody but the owner dominates the owner; a non-owner doesn't
+        # dominate an admin (and peer admins don't dominate each other).
+        return False
+    if superior.is_admin:
+        return True
+    sup_policy = getattr(superior.permissions, "_policy", None)
+    mem_policy = getattr(member.permissions, "_policy", None)
+    if not isinstance(sup_policy, dict) or _contains_deny(list(sup_policy.values())):
+        return False
+    if not isinstance(mem_policy, dict):
+        mem_policy = {}
+    # Dominance is about access, not management scopes: exclude the admin
+    # category, otherwise a manager (who always carries an admin scope a plain
+    # member lacks) would "strictly dominate" even an access-equal peer.
+    sup_access = {key: val for key, val in sup_policy.items() if key != CAT_ADMIN}
+    mem_access = {key: val for key, val in mem_policy.items() if key != CAT_ADMIN}
+    # superior covers everything member is allowed, and holds something more
+    return _allow_subset(mem_access, sup_access) and not _allow_subset(
+        sup_access, mem_access
     )
 
 
