@@ -3,6 +3,10 @@
 from typing import Any
 import uuid
 
+from aiohttp import web
+
+from homeassistant.auth.permissions import can_author_scenes
+from homeassistant.components.http import KEY_HASS_USER
 from homeassistant.components.scene import (
     DOMAIN as SCENE_DOMAIN,
     PLATFORM_SCHEMA as SCENE_PLATFORM_SCHEMA,
@@ -10,6 +14,7 @@ from homeassistant.components.scene import (
 from homeassistant.config import SCENE_CONFIG_PATH
 from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant, callback
+from homeassistant.exceptions import Unauthorized
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 
 from .const import ACTION_DELETE
@@ -54,6 +59,12 @@ def async_setup(hass: HomeAssistant) -> bool:
 
 class EditSceneConfigView(EditIdBasedConfigView):
     """Edit scene config."""
+
+    def _authorize(self, request: web.Request) -> None:
+        """Allow admins and any user permitted to author scenes."""
+        user = request[KEY_HASS_USER]
+        if user is None or not can_author_scenes(user):
+            raise Unauthorized
 
     def _write_value(
         self,

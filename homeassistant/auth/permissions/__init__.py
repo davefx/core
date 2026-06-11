@@ -12,6 +12,8 @@ from .const import (
     ADMIN_GROUPS,
     ADMIN_MANAGE_AUTOMATIONS,
     ADMIN_MANAGE_GROUPS,
+    ADMIN_MANAGE_SCENES,
+    ADMIN_MANAGE_SCRIPTS,
     CAT_ADMIN,
     CAT_AUTOMATIONS,
     CAT_ENTITIES,
@@ -100,6 +102,16 @@ class AbstractPermissions:
     @property
     def can_manage_automations(self) -> bool:
         """Global capability to author automations."""
+        return False
+
+    @property
+    def can_manage_scripts(self) -> bool:
+        """Global capability to author scripts."""
+        return False
+
+    @property
+    def can_manage_scenes(self) -> bool:
+        """Global capability to author scenes."""
         return False
 
     @property
@@ -192,6 +204,22 @@ class PolicyPermissions(AbstractPermissions):
         return isinstance(admin, dict) and admin.get(ADMIN_MANAGE_AUTOMATIONS) is True
 
     @property
+    def can_manage_scripts(self) -> bool:
+        """Global capability to author scripts."""
+        admin = self._policy.get(CAT_ADMIN)
+        if admin is True:
+            return True
+        return isinstance(admin, dict) and admin.get(ADMIN_MANAGE_SCRIPTS) is True
+
+    @property
+    def can_manage_scenes(self) -> bool:
+        """Global capability to author scenes."""
+        admin = self._policy.get(CAT_ADMIN)
+        if admin is True:
+            return True
+        return isinstance(admin, dict) and admin.get(ADMIN_MANAGE_SCENES) is True
+
+    @property
     def can_escalate(self) -> bool:
         """May grant permissions the user does not hold themselves."""
         admin = self._policy.get(CAT_ADMIN)
@@ -238,6 +266,16 @@ class _OwnerPermissions(AbstractPermissions):
         return True
 
     @property
+    def can_manage_scripts(self) -> bool:
+        """Global capability to author scripts."""
+        return True
+
+    @property
+    def can_manage_scenes(self) -> bool:
+        """Global capability to author scenes."""
+        return True
+
+    @property
     def can_escalate(self) -> bool:
         """May grant permissions the user does not hold themselves."""
         return True
@@ -254,6 +292,16 @@ def can_create_groups(user: User) -> bool:
 def can_author_automations(user: User) -> bool:
     """Whether a user may create/edit/delete automations."""
     return user.is_admin or user.permissions.can_manage_automations
+
+
+def can_author_scripts(user: User) -> bool:
+    """Whether a user may create/edit/delete scripts."""
+    return user.is_admin or user.permissions.can_manage_scripts
+
+
+def can_author_scenes(user: User) -> bool:
+    """Whether a user may create/edit/delete scenes."""
+    return user.is_admin or user.permissions.can_manage_scenes
 
 
 def can_set_automation_owner(

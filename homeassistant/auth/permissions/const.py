@@ -21,6 +21,8 @@ GROUP_IDS = "group_ids"
 # "you can only grant what you already hold" rule.
 ADMIN_MANAGE_GROUPS = "manage_groups"  # global: create/delete custom groups
 ADMIN_MANAGE_AUTOMATIONS = "manage_automations"  # global: author automations
+ADMIN_MANAGE_SCRIPTS = "manage_scripts"  # global: author scripts
+ADMIN_MANAGE_SCENES = "manage_scenes"  # global: author scenes
 ADMIN_ESCALATE = "escalate"  # grant permissions you don't hold yourself
 ADMIN_GROUPS = "groups"  # per-group scopes below
 SCOPE_VIEW = "view"

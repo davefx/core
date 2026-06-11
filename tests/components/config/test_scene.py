@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 
+from tests.common import CLIENT_ID, MockUser
 from tests.typing import ClientSessionGenerator
 
 
@@ -269,3 +270,45 @@ async def test_api_calls_require_admin(
     # Delete
     resp = await client.delete("/api/config/scene/config/light_on")
     assert resp.status == HTTPStatus.UNAUTHORIZED
+
+
+@pytest.mark.parametrize("scene_config", [{}])
+@pytest.mark.usefixtures("setup_scene")
+async def test_non_admin_author_can_edit_scene(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_config_store: dict[str, Any],
+) -> None:
+    """A non-admin holding manage_scenes may read and write scenes."""
+    with patch.object(config, "SECTIONS", [scene]):
+        await async_setup_component(hass, "config", {})
+
+    author = MockUser(name="Scene author").add_to_hass(hass)
+    author.mock_policy({"admin": {"manage_scenes": True}})
+    assert not author.is_admin
+    refresh_token = await hass.auth.async_create_refresh_token(author, CLIENT_ID)
+    access_token = hass.auth.async_create_access_token(refresh_token)
+    client = await hass_client(access_token)
+
+    hass_config_store["scenes.yaml"] = [
+        {
+            "id": "light_off",
+            "name": "Lights off",
+            "entities": {"light.bedroom": {"state": "off"}},
+        }
+    ]
+
+    resp = await client.get("/api/config/scene/config/light_off")
+    assert resp.status == HTTPStatus.OK
+
+    resp = await client.post(
+        "/api/config/scene/config/light_off",
+        data=json.dumps(
+            {
+                "id": "light_off",
+                "name": "Lights off",
+                "entities": {"light.bedroom": {"state": "off"}},
+            }
+        ),
+    )
+    assert resp.status == HTTPStatus.OK

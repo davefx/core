@@ -2,6 +2,10 @@
 
 from typing import Any
 
+from aiohttp import web
+
+from homeassistant.auth.permissions import can_author_scripts
+from homeassistant.components.http import KEY_HASS_USER
 from homeassistant.components.script import DOMAIN as SCRIPT_DOMAIN
 from homeassistant.components.script.config import (  # pylint: disable=home-assistant-component-root-import
     async_validate_config_item,
@@ -9,6 +13,7 @@ from homeassistant.components.script.config import (  # pylint: disable=home-ass
 from homeassistant.config import SCRIPT_CONFIG_PATH
 from homeassistant.const import SERVICE_RELOAD
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import Unauthorized
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 
 from .const import ACTION_DELETE
@@ -51,6 +56,12 @@ def async_setup(hass: HomeAssistant) -> bool:
 
 class EditScriptConfigView(EditKeyBasedConfigView):
     """Edit script config."""
+
+    def _authorize(self, request: web.Request) -> None:
+        """Allow admins and any user permitted to author scripts."""
+        user = request[KEY_HASS_USER]
+        if user is None or not can_author_scripts(user):
+            raise Unauthorized
 
     def _write_value(
         self,

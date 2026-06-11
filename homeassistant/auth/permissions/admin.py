@@ -4,6 +4,8 @@ A user's ``admin`` policy describes what they may *manage*, separate from what
 they may access. It carries two global flags plus per-group scopes:
 
 - ``manage_groups``: create and delete custom groups.
+- ``manage_automations`` / ``manage_scripts`` / ``manage_scenes``: author the
+  respective config type without being an admin (each granted independently).
 - ``escalate``: grant permissions the user does not hold themselves (the
   Kubernetes RBAC "escalate" rule). Without it, a delegated manager can only
   grant a subset of their own permissions.
@@ -55,6 +57,8 @@ ADMIN_POLICY_SCHEMA = vol.Any(
         {
             vol.Optional("manage_groups"): vol.Any(True, False),
             vol.Optional("manage_automations"): vol.Any(True, False),
+            vol.Optional("manage_scripts"): vol.Any(True, False),
+            vol.Optional("manage_scenes"): vol.Any(True, False),
             vol.Optional("escalate"): vol.Any(True, False),
             vol.Optional("groups"): GROUPS_SCHEMA,
         }

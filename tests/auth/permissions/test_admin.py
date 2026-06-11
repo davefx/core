@@ -10,6 +10,8 @@ from homeassistant.auth.permissions import (
     OwnerPermissions,
     PolicyPermissions,
     can_author_automations,
+    can_author_scenes,
+    can_author_scripts,
     can_create_groups,
     can_grant,
     can_manage_group,
@@ -278,6 +280,43 @@ def test_can_author_automations() -> None:
     assert can_author_automations(_user({}, is_admin=True)) is True
     assert can_author_automations(_user({"admin": {"manage_automations": True}})) is True
     assert can_author_automations(_user({})) is False
+
+
+def test_authoring_flags_are_independent() -> None:
+    """manage_scripts / manage_scenes grant only their own type.
+
+    Each authoring capability is a separate flag; holding one does not imply
+    the others, so a delegated author can be scoped to exactly one config type.
+    """
+    scripts_only = _user({"admin": {"manage_scripts": True}})
+    assert can_author_scripts(scripts_only) is True
+    assert can_author_scenes(scripts_only) is False
+    assert can_author_automations(scripts_only) is False
+
+    scenes_only = _user({"admin": {"manage_scenes": True}})
+    assert can_author_scenes(scenes_only) is True
+    assert can_author_scripts(scenes_only) is False
+
+    # Admins and the owner may author every type.
+    admin = _user({}, is_admin=True)
+    assert can_author_scripts(admin) is True
+    assert can_author_scenes(admin) is True
+    assert OwnerPermissions.can_manage_scripts is True
+    assert OwnerPermissions.can_manage_scenes is True
+
+    # A plain user authors nothing.
+    nobody = _user({})
+    assert can_author_scripts(nobody) is False
+    assert can_author_scenes(nobody) is False
+
+
+def test_policy_schema_accepts_script_scene_flags() -> None:
+    """The new authoring flags validate in the admin policy."""
+    policy = POLICY_SCHEMA(
+        {"admin": {"manage_scripts": True, "manage_scenes": False}}
+    )
+    assert policy["admin"]["manage_scripts"] is True
+    assert policy["admin"]["manage_scenes"] is False
 
 
 def test_can_set_automation_owner() -> None:

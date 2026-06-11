@@ -15,6 +15,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from homeassistant.util import yaml as yaml_util
 
+from tests.common import CLIENT_ID, MockUser
 from tests.typing import ClientSessionGenerator
 
 
@@ -353,3 +354,33 @@ async def test_api_calls_require_admin(
     # Delete
     resp = await client.delete("/api/config/script/config/moon")
     assert resp.status == HTTPStatus.UNAUTHORIZED
+
+
+@pytest.mark.parametrize("script_config", [{}])
+async def test_non_admin_author_can_edit_script(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_config_store: dict[str, Any],
+) -> None:
+    """A non-admin holding manage_scripts may read and write scripts."""
+    with patch.object(config, "SECTIONS", [script]):
+        await async_setup_component(hass, "config", {})
+
+    author = MockUser(name="Script author").add_to_hass(hass)
+    author.mock_policy({"admin": {"manage_scripts": True}})
+    assert not author.is_admin
+    refresh_token = await hass.auth.async_create_refresh_token(author, CLIENT_ID)
+    access_token = hass.auth.async_create_access_token(refresh_token)
+    client = await hass_client(access_token)
+
+    hass_config_store["scripts.yaml"] = {"moon": {"alias": "Moon"}}
+
+    resp = await client.get("/api/config/script/config/moon")
+    assert resp.status == HTTPStatus.OK
+
+    resp = await client.post(
+        "/api/config/script/config/moon",
+        data=json.dumps({"alias": "Moon updated", "sequence": []}),
+    )
+    await hass.async_block_till_done()
+    assert resp.status == HTTPStatus.OK
