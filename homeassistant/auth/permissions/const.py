@@ -20,6 +20,7 @@ GROUP_IDS = "group_ids"
 # fine-grained group permissions; the escalation guard is the Kubernetes RBAC
 # "you can only grant what you already hold" rule.
 ADMIN_MANAGE_GROUPS = "manage_groups"  # global: create/delete custom groups
+ADMIN_MANAGE_AUTOMATIONS = "manage_automations"  # global: author automations
 ADMIN_ESCALATE = "escalate"  # grant permissions you don't hold yourself
 ADMIN_GROUPS = "groups"  # per-group scopes below
 SCOPE_VIEW = "view"

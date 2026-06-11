@@ -10,6 +10,7 @@ from .automations import AUTOMATION_POLICY_SCHEMA, compile_automations
 from .const import (
     ADMIN_ESCALATE,
     ADMIN_GROUPS,
+    ADMIN_MANAGE_AUTOMATIONS,
     ADMIN_MANAGE_GROUPS,
     CAT_ADMIN,
     CAT_AUTOMATIONS,
@@ -44,6 +45,7 @@ __all__ = [
     "PermissionLookup",
     "PolicyPermissions",
     "PolicyType",
+    "can_author_automations",
     "can_create_groups",
     "can_grant",
     "can_manage_group",
@@ -92,6 +94,11 @@ class AbstractPermissions:
     @property
     def can_manage_groups(self) -> bool:
         """Global capability to create and delete custom groups."""
+        return False
+
+    @property
+    def can_manage_automations(self) -> bool:
+        """Global capability to author automations."""
         return False
 
     @property
@@ -176,6 +183,14 @@ class PolicyPermissions(AbstractPermissions):
         return isinstance(admin, dict) and admin.get(ADMIN_MANAGE_GROUPS) is True
 
     @property
+    def can_manage_automations(self) -> bool:
+        """Global capability to author automations."""
+        admin = self._policy.get(CAT_ADMIN)
+        if admin is True:
+            return True
+        return isinstance(admin, dict) and admin.get(ADMIN_MANAGE_AUTOMATIONS) is True
+
+    @property
     def can_escalate(self) -> bool:
         """May grant permissions the user does not hold themselves."""
         admin = self._policy.get(CAT_ADMIN)
@@ -217,6 +232,11 @@ class _OwnerPermissions(AbstractPermissions):
         return True
 
     @property
+    def can_manage_automations(self) -> bool:
+        """Global capability to author automations."""
+        return True
+
+    @property
     def can_escalate(self) -> bool:
         """May grant permissions the user does not hold themselves."""
         return True
@@ -228,6 +248,11 @@ OwnerPermissions = _OwnerPermissions()
 def can_create_groups(user: User) -> bool:
     """Whether a user may create/delete custom groups."""
     return user.is_admin or user.permissions.can_manage_groups
+
+
+def can_author_automations(user: User) -> bool:
+    """Whether a user may create/edit/delete automations."""
+    return user.is_admin or user.permissions.can_manage_automations
 
 
 def can_manage_group(user: User, group_id: str) -> bool:

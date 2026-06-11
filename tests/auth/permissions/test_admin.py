@@ -9,6 +9,7 @@ from homeassistant.auth.permissions import (
     POLICY_SCHEMA,
     OwnerPermissions,
     PolicyPermissions,
+    can_author_automations,
     can_create_groups,
     can_grant,
     can_manage_group,
@@ -264,3 +265,10 @@ def test_can_grant_deny_holder_is_conservative() -> None:
     )
     # Conservatively refused (would otherwise risk granting the carved-out lock).
     assert can_grant(holder, {"entities": {"all": {"control": True}}}) is False
+
+
+def test_can_author_automations() -> None:
+    """Admins and users with manage_automations may author automations."""
+    assert can_author_automations(_user({}, is_admin=True)) is True
+    assert can_author_automations(_user({"admin": {"manage_automations": True}})) is True
+    assert can_author_automations(_user({})) is False

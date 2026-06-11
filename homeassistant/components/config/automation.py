@@ -5,6 +5,7 @@ import uuid
 
 from aiohttp import web
 
+from homeassistant.auth.permissions import can_author_automations
 from homeassistant.components.automation import (
     DOMAIN as AUTOMATION_DOMAIN,
     async_record_owner,
@@ -17,6 +18,7 @@ from homeassistant.components.http import KEY_HASS, KEY_HASS_USER
 from homeassistant.config import AUTOMATION_CONFIG_PATH
 from homeassistant.const import CONF_ID, SERVICE_RELOAD
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import Unauthorized
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 
 from .const import ACTION_DELETE
@@ -66,9 +68,15 @@ def async_setup(hass: HomeAssistant) -> bool:
 class EditAutomationConfigView(EditIdBasedConfigView):
     """Edit automation config."""
 
+    def _authorize(self, request: web.Request) -> None:
+        """Allow admins and any user permitted to author automations."""
+        user = request[KEY_HASS_USER]
+        if user is None or not can_author_automations(user):
+            raise Unauthorized
+
     async def post(self, request: web.Request, config_key: str) -> web.Response:
         """Persist config and record the creating user as the owner."""
-        # The base post is @require_admin, so authorization is unchanged.
+        # super().post() runs _authorize() (admins or automation authors).
         response = await super().post(request, config_key)
         if response.status < 400 and (user := request[KEY_HASS_USER]) is not None:
             # First writer wins, so this records the creator. Automatic

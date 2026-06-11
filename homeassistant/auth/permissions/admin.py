@@ -54,6 +54,7 @@ ADMIN_POLICY_SCHEMA = vol.Any(
     vol.Schema(
         {
             vol.Optional("manage_groups"): vol.Any(True, False),
+            vol.Optional("manage_automations"): vol.Any(True, False),
             vol.Optional("escalate"): vol.Any(True, False),
             vol.Optional("groups"): GROUPS_SCHEMA,
         }

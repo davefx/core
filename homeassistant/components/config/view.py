@@ -9,10 +9,10 @@ from typing import Any, cast
 from aiohttp import web
 import voluptuous as vol
 
-from homeassistant.components.http import KEY_HASS, HomeAssistantView, require_admin
+from homeassistant.components.http import KEY_HASS, KEY_HASS_USER, HomeAssistantView
 from homeassistant.const import CONF_ID
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, Unauthorized
 from homeassistant.util.file import write_utf8_file_atomic
 from homeassistant.util.yaml import dump, load_yaml
 from homeassistant.util.yaml.loader import JSON_TYPE
@@ -82,9 +82,18 @@ class BaseEditConfigView[_DataT: (dict[str, dict[str, Any]], list[dict[str, Any]
         """Delete value."""
         raise NotImplementedError
 
-    @require_admin
+    def _authorize(self, request: web.Request) -> None:
+        """Authorize the request.
+
+        Admin-only by default; subclasses may override to allow delegated
+        access (e.g. users holding a specific permission).
+        """
+        if not request[KEY_HASS_USER].is_admin:
+            raise Unauthorized
+
     async def get(self, request: web.Request, config_key: str) -> web.Response:
         """Fetch device specific config."""
+        self._authorize(request)
         hass = request.app[KEY_HASS]
         async with self.mutation_lock:
             current = await self.read_config(hass)
@@ -95,9 +104,9 @@ class BaseEditConfigView[_DataT: (dict[str, dict[str, Any]], list[dict[str, Any]
 
         return self.json(value)
 
-    @require_admin
     async def post(self, request: web.Request, config_key: str) -> web.Response:
         """Validate config and return results."""
+        self._authorize(request)
         try:
             data = await request.json()
         except ValueError:
@@ -138,9 +147,9 @@ class BaseEditConfigView[_DataT: (dict[str, dict[str, Any]], list[dict[str, Any]
 
         return self.json({"result": "ok"})
 
-    @require_admin
     async def delete(self, request: web.Request, config_key: str) -> web.Response:
         """Remove an entry."""
+        self._authorize(request)
         hass = request.app[KEY_HASS]
         async with self.mutation_lock:
             current = await self.read_config(hass)
