@@ -442,6 +442,35 @@ async def test_set_owner_admin_adopts(
 
 @pytest.mark.parametrize("automation_config", [{}])
 @pytest.mark.usefixtures("setup_automation")
+async def test_get_owner(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+) -> None:
+    """get_owner returns null for an unowned automation, then the set owner."""
+    with patch.object(config, "SECTIONS", [automation]):
+        await async_setup_component(hass, "config", {})
+
+    target = await hass.auth.async_create_user("Target")
+    client = await hass_ws_client(hass)
+
+    await client.send_json(
+        {"id": 5, "type": "config/automation/get_owner", "automation_id": "a1"}
+    )
+    result = await client.receive_json()
+    assert result["success"], result
+    assert result["result"] == {"owner_id": None}
+
+    await automation.async_set_owner(hass, "a1", target.id)
+
+    await client.send_json(
+        {"id": 6, "type": "config/automation/get_owner", "automation_id": "a1"}
+    )
+    result = await client.receive_json()
+    assert result["result"] == {"owner_id": target.id}
+
+
+@pytest.mark.parametrize("automation_config", [{}])
+@pytest.mark.usefixtures("setup_automation")
 async def test_set_owner_unknown_user(
     hass: HomeAssistant,
     hass_ws_client: WebSocketGenerator,

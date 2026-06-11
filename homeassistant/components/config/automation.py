@@ -70,7 +70,34 @@ def async_setup(hass: HomeAssistant) -> bool:
         )
     )
     websocket_api.async_register_command(hass, websocket_set_owner)
+    websocket_api.async_register_command(hass, websocket_get_owner)
     return True
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "config/automation/get_owner",
+        vol.Required("automation_id"): str,
+    }
+)
+@callback
+def websocket_get_owner(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return the run-as owner of an automation (null if unowned).
+
+    Readable by any authenticated user: ownership is metadata the UI needs to
+    decide whether to offer transfer or a personal copy. Mutating it still goes
+    through set_owner and its authority checks.
+    """
+    connection.send_message(
+        websocket_api.result_message(
+            msg["id"],
+            {"owner_id": async_get_owner(hass, msg["automation_id"])},
+        )
+    )
 
 
 @websocket_api.websocket_command(
