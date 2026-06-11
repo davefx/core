@@ -15,15 +15,21 @@ from homeassistant.auth.permissions import (
     can_manage_group,
     can_manage_members,
     can_modify_group,
+    can_set_automation_owner,
     can_set_member,
 )
 
 
 def _user(
-    policy: dict, *, is_admin: bool = False, is_owner: bool = False
+    policy: dict,
+    *,
+    is_admin: bool = False,
+    is_owner: bool = False,
+    uid: str = "u",
 ) -> SimpleNamespace:
     """Minimal User stand-in with a PolicyPermissions object."""
     return SimpleNamespace(
+        id=uid,
         is_admin=is_admin or is_owner,
         is_owner=is_owner,
         permissions=PolicyPermissions(policy, None),
@@ -272,3 +278,30 @@ def test_can_author_automations() -> None:
     assert can_author_automations(_user({}, is_admin=True)) is True
     assert can_author_automations(_user({"admin": {"manage_automations": True}})) is True
     assert can_author_automations(_user({})) is False
+
+
+def test_can_set_automation_owner() -> None:
+    """Transfer/adopt: authoring authority + dominance of both owners."""
+    author = _user(
+        {"admin": {"manage_automations": True}, "entities": {"entity_ids": {"light.a": {"control": True}}}},
+        uid="author",
+    )
+    sub = _user({}, uid="sub")  # strict subordinate (no access)
+    superior = _user(
+        {"entities": {"entity_ids": {"light.a": {"control": True}, "lock.d": {"control": True}}}},
+        uid="sup",
+    )
+    # Adopt an unowned automation to self -> ok.
+    assert can_set_automation_owner(author, None, author) is True
+    # Assign to a subordinate -> ok (author dominates sub).
+    assert can_set_automation_owner(author, None, sub) is True
+    # Steal from a superior -> blocked (can't dominate the current owner).
+    assert can_set_automation_owner(author, superior, author) is False
+    # Make a superior the run-as -> blocked (can't dominate the new owner).
+    assert can_set_automation_owner(author, None, superior) is False
+    # A non-author can't reassign someone else's automation...
+    assert can_set_automation_owner(sub, author, sub) is False
+    # ...but the current owner may hand off their own to a subordinate.
+    owner_sub = _user({"entities": {"entity_ids": {"light.a": {"control": True}}}}, uid="o")
+    lesser = _user({}, uid="lesser")
+    assert can_set_automation_owner(owner_sub, owner_sub, lesser) is True

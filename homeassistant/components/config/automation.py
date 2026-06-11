@@ -4,12 +4,19 @@ from typing import Any
 import uuid
 
 from aiohttp import web
+import voluptuous as vol
 
-from homeassistant.auth.permissions import can_author_automations
+from homeassistant.auth.permissions import (
+    can_author_automations,
+    can_set_automation_owner,
+)
+from homeassistant.components import websocket_api
 from homeassistant.components.automation import (
     DOMAIN as AUTOMATION_DOMAIN,
+    async_get_owner,
     async_record_owner,
     async_remove_owner,
+    async_set_owner,
 )
 from homeassistant.components.automation.config import (  # pylint: disable=home-assistant-component-root-import
     async_validate_config_item,
@@ -62,7 +69,50 @@ def async_setup(hass: HomeAssistant) -> bool:
             data_validator=async_validate_config_item,
         )
     )
+    websocket_api.async_register_command(hass, websocket_set_owner)
     return True
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "config/automation/set_owner",
+        vol.Required("automation_id"): str,
+        vol.Required("user_id"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_set_owner(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Set the run-as owner of an automation (transfer / adoption)."""
+    new_owner = await hass.auth.async_get_user(msg["user_id"])
+    if new_owner is None:
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"], websocket_api.ERR_NOT_FOUND, "User not found"
+            )
+        )
+        return
+
+    current_owner_id = async_get_owner(hass, msg["automation_id"])
+    current_owner = (
+        await hass.auth.async_get_user(current_owner_id) if current_owner_id else None
+    )
+
+    if not can_set_automation_owner(connection.user, current_owner, new_owner):
+        connection.send_message(
+            websocket_api.error_message(
+                msg["id"],
+                websocket_api.ERR_UNAUTHORIZED,
+                "Not authorized to set this automation's owner",
+            )
+        )
+        return
+
+    await async_set_owner(hass, msg["automation_id"], new_owner.id)
+    connection.send_message(websocket_api.result_message(msg["id"]))
 
 
 class EditAutomationConfigView(EditIdBasedConfigView):

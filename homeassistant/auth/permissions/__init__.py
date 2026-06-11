@@ -51,6 +51,7 @@ __all__ = [
     "can_manage_group",
     "can_manage_members",
     "can_modify_group",
+    "can_set_automation_owner",
     "can_set_member",
     "filter_entity_ids_by_permission",
     "merge_policies",
@@ -253,6 +254,25 @@ def can_create_groups(user: User) -> bool:
 def can_author_automations(user: User) -> bool:
     """Whether a user may create/edit/delete automations."""
     return user.is_admin or user.permissions.can_manage_automations
+
+
+def can_set_automation_owner(
+    actor: User, current_owner: User | None, new_owner: User
+) -> bool:
+    """Whether `actor` may set an automation's run-as owner to `new_owner`.
+
+    Ownership transfer / adoption. The actor must be allowed to author
+    automations (or already be the owner handing off their own), and must
+    strictly dominate or equal *both* the current owner (no stealing a
+    peer/superior's automation) and the new owner (no making a superior run an
+    automation you control — confused-deputy escalation).
+    """
+    is_current = current_owner is not None and current_owner.id == actor.id
+    if not (can_author_automations(actor) or is_current):
+        return False
+    if current_owner is not None and not _user_dominates(actor, current_owner):
+        return False
+    return _user_dominates(actor, new_owner)
 
 
 def can_manage_group(user: User, group_id: str) -> bool:
