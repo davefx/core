@@ -164,7 +164,7 @@ jobs:
           retention-days: 1
 
   build-frontend:
-    name: Build ACL frontend wheel
+    name: Rebase and build ACL frontend
     needs: check-release
     if: needs.check-release.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
@@ -192,7 +192,82 @@ jobs:
         with:
           repository: davefx/frontend
           ref: feature/acl-panel
+          fetch-depth: 0
+          # Force-pushing the rebased branch needs a token with write access to
+          # the frontend fork (and the workflow scope to touch its CI files).
           token: ${{ secrets.ACL_PUSH_TOKEN }}
+
+      - name: Rebase feature/acl-panel onto the matching frontend release
+        run: |
+          git config user.name "ACL Builder"
+          git config user.email "acl-builder@users.noreply.github.com"
+          # Reuse recorded conflict resolutions across rebases.
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+
+          FE="${{ steps.pin.outputs.frontend_version }}"
+
+          # The frontend tags releases as the bare version (e.g. 20260527.5),
+          # which is exactly what core pins, so align the panel to that tag.
+          git remote add upstream https://github.com/home-assistant/frontend.git
+          git fetch --no-tags upstream tag "$FE"
+
+          # Restore the shared rerere cache (branch rerere-cache on the fork) so
+          # conflicts resolved before replay automatically here.
+          rr="$(git rev-parse --git-path rr-cache)"
+          mkdir -p "$rr"
+          if git fetch origin rerere-cache 2>/dev/null; then
+            git archive FETCH_HEAD | tar -x -C "$rr" || true
+          fi
+
+          # Persist newly recorded resolutions back to the shared cache.
+          save_rerere() {
+            local idx tree commit parent=""
+            if git fetch origin rerere-cache 2>/dev/null; then
+              git archive FETCH_HEAD | tar -x -C "$rr" || true
+              parent="-p FETCH_HEAD"
+            fi
+            idx="$(mktemp)"; rm -f "$idx"
+            GIT_INDEX_FILE="$idx" git --work-tree="$rr" add -A 2>/dev/null \
+              || { rm -f "$idx"; return 0; }
+            tree="$(GIT_INDEX_FILE="$idx" git write-tree)"; rm -f "$idx"
+            commit="$(git commit-tree "$tree" $parent -m "Update shared rerere cache")"
+            git push origin "$commit:refs/heads/rerere-cache" || true
+          }
+
+          # Replay the ACL panel commits on top of the frontend release. rerere
+          # auto-resolves conflicts it has seen before; we stop (and fail) only
+          # for genuinely new, unresolved conflicts.
+          ok=true
+          if ! git rebase "$FE"; then
+            guard=0
+            while [ -d "$(git rev-parse --git-path rebase-merge)" ] \
+               || [ -d "$(git rev-parse --git-path rebase-apply)" ]; do
+              guard=$((guard + 1))
+              if [ "$guard" -gt 100 ]; then ok=false; break; fi
+              if [ -n "$(git diff --diff-filter=U --name-only)" ]; then
+                ok=false; break
+              fi
+              git add -A
+              GIT_EDITOR=true git rebase --continue >/dev/null 2>&1 || true
+            done
+          fi
+
+          if [ "$ok" = true ]; then
+            save_rerere
+            git push origin HEAD:feature/acl-panel --force-with-lease
+            echo "Rebased feature/acl-panel onto frontend $FE"
+          else
+            git rebase --abort 2>/dev/null || true
+            {
+              echo "## Frontend rebase conflict: feature/acl-panel on $FE"
+              echo ""
+              echo "The ACL frontend branch failed to rebase cleanly onto frontend release \`$FE\`."
+              echo "Resolve once (rerere records it for next time), push feature/acl-panel to the fork, then re-run."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Frontend rebase has conflicts rerere could not resolve; manual resolution required."
+            exit 1
+          fi
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -207,8 +282,9 @@ jobs:
       - name: Stamp the wheel version to match the core pin
         run: |
           FE="${{ steps.pin.outputs.frontend_version }}"
-          # The hardcoded version in pyproject.toml reflects the branch base;
-          # override it so the produced wheel == the version core expects.
+          # After the rebase the version already equals the release tag; stamp
+          # defensively so the wheel matches the pin even if a panel commit ever
+          # overrides pyproject.toml.
           sed -i -E "s/^version[[:space:]]*=.*/version = \"${FE}\"/" pyproject.toml
           grep -E '^version' pyproject.toml
 
