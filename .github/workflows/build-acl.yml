@@ -163,9 +163,74 @@ jobs:
           path: .
           retention-days: 1
 
+  build-frontend:
+    name: Build ACL frontend wheel
+    needs: check-release
+    if: needs.check-release.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Determine the frontend version this core release pins
+        id: pin
+        run: |
+          VERSION="${{ needs.check-release.outputs.version }}"
+          # acl-patches never repins the frontend, so the upstream release tag
+          # is the source of truth. The wheel must carry this exact version so
+          # the Dockerfile's pre-stage install satisfies requirements_all.txt's
+          # `home-assistant-frontend==<version>` pin and our build is kept.
+          FE=$(curl -fsSL \
+            "https://raw.githubusercontent.com/home-assistant/core/${VERSION}/requirements_all.txt" \
+            | awk -F'==' '/^home-assistant-frontend==/{print $2; exit}')
+          if [ -z "$FE" ]; then
+            echo "Could not find the home-assistant-frontend pin for ${VERSION}"
+            exit 1
+          fi
+          echo "frontend_version=${FE}" >> "$GITHUB_OUTPUT"
+          echo "Core ${VERSION} pins frontend ${FE}"
+
+      - name: Checkout ACL frontend
+        uses: actions/checkout@v4
+        with:
+          repository: davefx/frontend
+          ref: feature/acl-panel
+          token: ${{ secrets.ACL_PUSH_TOKEN }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Stamp the wheel version to match the core pin
+        run: |
+          FE="${{ steps.pin.outputs.frontend_version }}"
+          # The hardcoded version in pyproject.toml reflects the branch base;
+          # override it so the produced wheel == the version core expects.
+          sed -i -E "s/^version[[:space:]]*=.*/version = \"${FE}\"/" pyproject.toml
+          grep -E '^version' pyproject.toml
+
+      - name: Build frontend wheel
+        run: |
+          corepack enable
+          python3 -m pip install --upgrade build
+          # script/release runs: yarn install -> build_frontend -> python -m build.
+          # It reads the (now stamped) version from pyproject.toml.
+          script/release
+          ls -la dist/
+
+      - name: Upload frontend wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-wheel
+          path: dist/home_assistant_frontend-*.whl
+          retention-days: 1
+
   build-base:
     name: Build base (${{ matrix.arch }})
-    needs: [check-release, rebase-patches]
+    needs: [check-release, rebase-patches, build-frontend]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -179,6 +244,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: patched-source
+
+      - name: Stage the ACL frontend wheel for the Docker build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-wheel
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
