@@ -255,8 +255,16 @@ jobs:
 
           if [ "$ok" = true ]; then
             save_rerere
-            git push origin HEAD:feature/acl-panel --force-with-lease
-            echo "Rebased feature/acl-panel onto frontend $FE"
+            # Persisting the rebased branch back to the fork is a convenience,
+            # not a build input (the wheel is built from this working tree). If
+            # the token can't write to the frontend fork, warn and keep going so
+            # the image still ships; grant write access for branch persistence
+            # and rerere caching across releases.
+            if git push origin HEAD:feature/acl-panel --force-with-lease; then
+              echo "Rebased feature/acl-panel onto frontend $FE"
+            else
+              echo "::warning::Rebased onto $FE locally but could not push to davefx/frontend (token lacks write access). Building from the local rebase; the fork branch was not updated."
+            fi
           else
             git rebase --abort 2>/dev/null || true
             {
